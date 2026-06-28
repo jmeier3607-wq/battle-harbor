@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Battle Harbor</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <canvas id="game"></canvas>
+
+    <section id="startScreen" class="start-screen">
+      <div class="start-panel">
+        <h1>Battle Harbor</h1>
+        <p>Fight, loot, escape.</p>
+        <label>
+          Nickname
+          <input id="nicknameInput" maxlength="16" autocomplete="off" placeholder="Captain" />
+        </label>
+        <div id="selectedShipPreview" class="ship-preview"></div>
+        <div id="shipSelect" class="ship-select"></div>
+        <div id="upgradePanel" class="upgrade-panel"></div>
+        <button id="playButton">Play</button>
+        <div class="controls-note">WASD / arrows move · mouse aims · click / space shoots · E exits · M minimap · Enter chat</div>
+      </div>
+    </section>
+
+    <div id="hud" class="hud hidden">
+      <div class="panel stats-panel">
+        <strong id="hudName">Captain</strong>
+        <span id="hudShip">Dinghy</span>
+        <small id="connectionStatus">Connecting...</small>
+        <div class="bar"><span id="hpBar"></span></div>
+        <div class="bar xp"><span id="xpBar"></span></div>
+        <div class="bar boost"><span id="boostBar"></span></div>
+        <small id="levelText">Level 1</small>
+      </div>
+
+      <div class="panel loot-panel">
+        <div>Temporary Loot <strong id="tempLoot">0</strong></div>
+        <div>Secured Points <strong id="securedPoints">0</strong></div>
+      </div>
+
+      <div class="panel map-panel">
+        <canvas id="minimap" width="190" height="190"></canvas>
+        <div id="zoneInfo"></div>
+        <div id="harborInfo">Harbor: --</div>
+        <div id="nearestInfo">Nearest player: none</div>
+        <div id="botInfo">Bots online: 0 / 0</div>
+      </div>
+
+      <div class="panel action-panel">
+        <button id="exitButton">Exit</button>
+        <button id="backLobbyButton">Back to Lobby</button>
+        <button id="allyButton">Ally nearest</button>
+        <button id="leaveAllyButton">Leave alliance</button>
+        <div id="exitStatus"></div>
+        <div id="effectStatus"></div>
+      </div>
+
+      <div class="panel weapon-panel">
+        <div id="weaponText">Weapon ready</div>
+        <div class="reload"><span id="reloadBar"></span></div>
+      </div>
+
+      <div class="panel chat-panel">
+        <div id="allianceStatus">No alliance</div>
+        <div id="chatMessages"></div>
+        <div class="chat-row">
+          <select id="chatChannel">
+            <option value="global">Global</option>
+            <option value="alliance">Alliance</option>
+          </select>
+          <input id="chatInput" maxlength="120" placeholder="Chat" />
+        </div>
+      </div>
+
+      <div id="debugPanel" class="panel debug-panel hidden"></div>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="client.js"></script>
+  </body>
+</html>
