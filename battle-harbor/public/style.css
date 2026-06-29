@@ -16,6 +16,9 @@
 body {
   margin: 0;
   overflow: hidden;
+  touch-action: none;
+  overscroll-behavior: none;
+  user-select: none;
   color: var(--ink);
   font-family: Inter, Segoe UI, Arial, sans-serif;
   background: #071827;
@@ -393,6 +396,47 @@ button:hover {
   font-size: 12px;
 }
 
+.alliance-list {
+  display: grid;
+  gap: 5px;
+  max-height: 96px;
+  overflow: auto;
+  margin-top: 6px;
+  font-size: 12px;
+}
+
+.alliance-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid rgba(172, 221, 255, 0.14);
+  border-radius: 6px;
+  padding: 5px 6px;
+  background: rgba(0, 0, 0, 0.16);
+}
+
+.alliance-row small {
+  display: block;
+  color: var(--muted);
+}
+
+.alliance-row.allied strong {
+  color: var(--green);
+}
+
+.alliance-row button,
+.invite-actions button {
+  padding: 5px 7px;
+  font-size: 11px;
+}
+
+.invite-actions {
+  display: flex;
+  gap: 5px;
+  margin-top: 4px;
+}
+
 #connectionStatus {
   color: var(--gold);
   margin-top: 4px;
@@ -406,6 +450,78 @@ button:hover {
   color: var(--muted);
   font: 12px/1.45 Consolas, monospace;
   white-space: pre-line;
+}
+
+.mobile-controls {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 8;
+}
+
+.joystick {
+  position: absolute;
+  left: 24px;
+  bottom: 28px;
+  width: 124px;
+  height: 124px;
+  border: 2px solid rgba(245, 251, 255, 0.35);
+  border-radius: 50%;
+  background: rgba(7, 20, 32, 0.45);
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.joystick span {
+  position: absolute;
+  left: 42px;
+  top: 42px;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: rgba(86, 214, 134, 0.88);
+  box-shadow: 0 0 18px rgba(86, 214, 134, 0.42);
+}
+
+.mobile-actions {
+  position: absolute;
+  right: 18px;
+  bottom: 22px;
+  display: grid;
+  grid-template-columns: repeat(2, 74px);
+  gap: 10px;
+  pointer-events: auto;
+}
+
+.mobile-actions button {
+  min-height: 56px;
+  border-radius: 50%;
+  padding: 0;
+  background: rgba(22, 102, 164, 0.86);
+  touch-action: none;
+}
+
+#touchShoot {
+  background: rgba(205, 71, 64, 0.9);
+}
+
+#touchBoost {
+  background: rgba(28, 143, 88, 0.9);
+}
+
+.portrait-hint {
+  position: fixed;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  z-index: 11;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(7, 20, 32, 0.86);
+  color: var(--gold);
+  padding: 8px 10px;
+  font-size: 12px;
+  pointer-events: none;
 }
 
 @media (max-width: 760px) {
@@ -433,5 +549,23 @@ button:hover {
 
   .weapon-panel {
     display: none;
+  }
+
+  .mobile-controls:not(.hidden) {
+    display: block !important;
+  }
+
+  .action-panel {
+    display: none;
+  }
+
+  .chat-panel {
+    max-height: 210px;
+  }
+}
+
+@media (max-width: 760px) and (orientation: portrait) {
+  .portrait-hint:not(.hidden) {
+    display: block !important;
   }
 }

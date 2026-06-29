@@ -65,6 +65,7 @@
 
       <div class="panel chat-panel">
         <div id="allianceStatus">No alliance</div>
+        <div id="allianceList" class="alliance-list"></div>
         <div id="chatMessages"></div>
         <div class="chat-row">
           <select id="chatChannel">
@@ -77,6 +78,18 @@
 
       <div id="debugPanel" class="panel debug-panel hidden"></div>
     </div>
+
+    <div id="mobileControls" class="mobile-controls hidden">
+      <div id="joystick" class="joystick"><span id="joystickKnob"></span></div>
+      <div class="mobile-actions">
+        <button id="touchShoot" aria-label="Shoot">Fire</button>
+        <button id="touchBoost" aria-label="Boost">Boost</button>
+        <button id="touchExit" aria-label="Exit">Exit</button>
+        <button id="touchMap" aria-label="Map">Map</button>
+      </div>
+    </div>
+
+    <div id="portraitHint" class="portrait-hint hidden">Landscape mode works best.</div>
 
     <script src="/socket.io/socket.io.js"></script>
     <script src="client.js"></script>

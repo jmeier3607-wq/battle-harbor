@@ -17,10 +17,14 @@ const MINIMAP_SEND_RATE = 1;
 const VIEW_DISTANCE = 2800;
 const VIEW_DISTANCE_SQ = VIEW_DISTANCE * VIEW_DISTANCE;
 const SAFE_ZONE = { x: 10000, y: 10000, radius: 620 };
-const MAX_BOTS_PER_PLAYER = 4;
-const BASE_BOT_TARGET = 45;
-const BOTS_PER_PLAYER_ONLINE = 3;
-const MAX_TOTAL_BOTS = 60;
+const SPEED_MULTIPLIER = 1.18;
+const ACCELERATION_MULTIPLIER = 1.14;
+const TURN_MULTIPLIER = 1.06;
+const SERVER_PERFORMANCE_MODE = process.env.SERVER_PERFORMANCE_MODE === "1";
+const MAX_BOTS_BASE = SERVER_PERFORMANCE_MODE ? 90 : 150;
+const MIN_TOTAL_BOTS = 45;
+const BOTS_REMOVED_PER_PLAYER = 15;
+const COLLISION_COOLDOWN_MS = 500;
 const SPAWN_PROTECTION_MS = 5000;
 const HEAL_DELAY_MS = 5000;
 const HEAL_RATE_PER_SECOND = 0.05;
@@ -103,6 +107,12 @@ const mapObjects = [
   { type: "crate", x: 10600, y: 10550, r: 34, collision: false }
 ];
 const obstacles = mapObjects.filter((object) => object.collision);
+const shipNames = Object.keys(ships);
+const botShipWeights = shipNames.map((ship, index) => ({
+  ship,
+  index,
+  weight: index < 5 ? 10 : index < 10 ? 6 : index < 15 ? 3 : index < 20 ? 1.5 : 0.5
+}));
 
 const blockedWords = ["badword", "insultword", "slurword", "threatword", "adultword"];
 const players = new Map();
@@ -110,11 +120,14 @@ const bots = new Map();
 const projectiles = new Map();
 const lootCrates = new Map();
 const mapItems = new Map();
+const collisionCooldowns = new Map();
+const allianceInvites = new Map();
 let nextBotId = 1;
 let nextProjectileId = 1;
 let nextCrateId = 1;
 let nextItemId = 1;
 let nextAllianceId = 1;
+let nextInviteId = 1;
 let lastBotPopulationCheck = 0;
 const worldEffects = [];
 
@@ -172,15 +185,50 @@ function isSafe(entity) {
 }
 
 function getBotTier(level) {
-  return botTiers.find((tier) => level >= tier.minLevel && level <= tier.maxLevel) || botTiers[0];
+  return createBotTierForZone(level <= 5 ? "Coast" : level <= 15 ? "Wreck Field" : "Storm Zone");
 }
 
 function getBotTierForZone(zone) {
-  const roll = Math.random();
-  if (zone === "Coast") return roll < 0.72 ? botTiers[0] : botTiers[1];
-  if (zone === "Wreck Field") return roll < 0.45 ? botTiers[1] : roll < 0.82 ? botTiers[2] : botTiers[3];
-  if (zone === "Storm Zone") return roll < 0.35 ? botTiers[2] : roll < 0.82 ? botTiers[3] : botTiers[4];
-  return roll < 0.5 ? botTiers[1] : roll < 0.85 ? botTiers[2] : botTiers[4];
+  return createBotTierForZone(zone);
+}
+
+function weightedBotShip(zone) {
+  const maxIndex = zone === "Coast" ? 10 : zone === "Wreck Field" ? 20 : shipNames.length;
+  const candidates = botShipWeights.filter((entry) => entry.index < maxIndex);
+  const total = candidates.reduce((sum, entry) => sum + entry.weight, 0);
+  let roll = Math.random() * total;
+  for (const entry of candidates) {
+    roll -= entry.weight;
+    if (roll <= 0) return entry;
+  }
+  return candidates[0];
+}
+
+function createBotTierForZone(zone) {
+  const picked = weightedBotShip(zone);
+  const ship = picked.ship;
+  const config = getShipConfig(ship);
+  const rank = picked.index + 1;
+  const zoneFactor = zone === "Coast" ? 0.62 : zone === "Wreck Field" ? 0.78 : zone === "Storm Zone" ? 0.95 : 0.85;
+  const threat = clamp(Math.ceil(rank / 5), 1, 5);
+  const role = threat <= 1 ? "ScoutBot" : threat === 2 ? "RaiderBot" : threat === 3 ? "GunnerBot" : threat === 4 ? "TankBot" : "EliteBot";
+  return {
+    minLevel: Math.max(1, rank),
+    maxLevel: 999,
+    role,
+    name: `${role} ${ship}`,
+    hp: Math.round(config.hp * zoneFactor * (0.85 + threat * 0.06)),
+    speed: config.speed * (0.68 + threat * 0.025),
+    damage: Math.round(config.damage * zoneFactor * (0.65 + threat * 0.06)),
+    fireRate: Math.round(config.fireRate * (1.08 - threat * 0.025)),
+    loot: Math.round((45 + rank * 28) * (zoneFactor + threat * 0.08)),
+    xp: Math.round((35 + rank * 14) * (zoneFactor + threat * 0.05)),
+    size: config.size,
+    ship,
+    preferredRange: config.range ? clamp(config.range * 0.55, 320, 720) : 420,
+    orbit: threat <= 2 ? 0.55 : threat === 3 ? 0.25 : 0.12,
+    threat
+  };
 }
 
 function sanitizeName(name) {
@@ -227,10 +275,10 @@ function getShipConfig(shipName, shipUpgrades = {}) {
   return {
     ...base,
     hp: Math.round(base.hp * (1 + upgrades.hp * 0.08)),
-    speed: base.speed * (1 + upgrades.speed * 0.05 * heavySpeedFactor),
-    acceleration: base.acceleration * (1 + upgrades.speed * 0.05 * heavySpeedFactor),
-    reverseSpeed: base.reverseSpeed * (1 + upgrades.speed * 0.035 * heavySpeedFactor),
-    turn: base.turn * (1 + upgrades.turn * 0.06),
+    speed: base.speed * SPEED_MULTIPLIER * (1 + upgrades.speed * 0.05 * heavySpeedFactor),
+    acceleration: base.acceleration * ACCELERATION_MULTIPLIER * (1 + upgrades.speed * 0.05 * heavySpeedFactor),
+    reverseSpeed: base.reverseSpeed * SPEED_MULTIPLIER * (1 + upgrades.speed * 0.035 * heavySpeedFactor),
+    turn: base.turn * TURN_MULTIPLIER * (1 + upgrades.turn * 0.06),
     damage: Math.round(base.damage * (1 + upgrades.damage * 0.07)),
     fireRate: Math.max(1500, Math.round(base.fireRate * (1 - upgrades.reload * 0.05))),
     boostMax: DEFAULT_BOOST_MAX * (1 + boostLevel * 0.1),
@@ -315,7 +363,7 @@ function validSpawn(x, y) {
 }
 
 function spawnBotNear(player) {
-  if (bots.size >= MAX_TOTAL_BOTS) return;
+  if (bots.size >= desiredBotCount()) return;
   const tier = getBotTier(player.level);
   for (let i = 0; i < 20; i++) {
     const a = Math.random() * Math.PI * 2;
@@ -352,7 +400,7 @@ function maintainBots() {
   if (!activePlayers.length) return;
   for (const player of activePlayers) {
     const nearby = [...bots.values()].filter((bot) => distance(bot, player) < 2200).length;
-    const dynamicLimit = Math.min(MAX_TOTAL_BOTS, activePlayers.length * MAX_BOTS_PER_PLAYER + 8);
+    const dynamicLimit = desiredBotCount();
     if (nearby < 3 && bots.size < dynamicLimit) {
       spawnBotNear(player);
     }
@@ -360,9 +408,7 @@ function maintainBots() {
 }
 
 function desiredBotCount() {
-  const online = players.size;
-  if (!online) return 0;
-  return Math.min(MAX_TOTAL_BOTS, BASE_BOT_TARGET + Math.max(0, online - 1) * BOTS_PER_PLAYER_ONLINE);
+  return clamp(MAX_BOTS_BASE - players.size * BOTS_REMOVED_PER_PLAYER, MIN_TOTAL_BOTS, MAX_BOTS_BASE);
 }
 
 function botZoneTarget(zone, target) {
@@ -393,14 +439,12 @@ function maintainBotPopulation(force = false) {
   if (!force && now - lastBotPopulationCheck < 3500) return;
   lastBotPopulationCheck = now;
   const target = desiredBotCount();
-  if (!target) {
-    bots.clear();
-    return;
-  }
   if (bots.size > target) {
     const removable = [...bots.values()].filter((bot) => [...players.values()].every((player) => distance(bot, player) > 2200));
-    while (bots.size > target && removable.length) {
+    let removed = 0;
+    while (bots.size > target && removable.length && removed < 4) {
       bots.delete(removable.pop().id);
+      removed++;
     }
   }
   const zones = ["Coast", "Wreck Field", "Storm Zone", "Deep Water"];
@@ -410,7 +454,8 @@ function maintainBotPopulation(force = false) {
     if (counts[zone] !== undefined) counts[zone]++;
   }
   let guard = 0;
-  while (bots.size < target && guard++ < 80) {
+  const spawnBudget = force ? 18 : 6;
+  while (bots.size < target && guard++ < spawnBudget) {
     const zone = zones.find((candidate) => counts[candidate] < botZoneTarget(candidate, target)) || zones[Math.floor(Math.random() * zones.length)];
     const point = findBotSpawnPoint(zone);
     if (!point) continue;
@@ -504,6 +549,54 @@ function canDamage(attacker, target) {
   if (target.type === "player" && target.spawnProtectedUntil > now) return false;
   if (attacker.allianceId && target.allianceId && attacker.allianceId === target.allianceId) return false;
   return true;
+}
+
+function collisionKey(a, b) {
+  return [a.id, b.id].sort().join(":");
+}
+
+function pushBoatsApart(a, b, minDistance) {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const d = Math.max(1, Math.hypot(dx, dy));
+  const overlap = Math.max(0, minDistance - d);
+  if (!overlap) return;
+  const nx = dx / d;
+  const ny = dy / d;
+  a.x = clamp(a.x - nx * overlap * 0.5, 35, WORLD_SIZE - 35);
+  a.y = clamp(a.y - ny * overlap * 0.5, 35, WORLD_SIZE - 35);
+  b.x = clamp(b.x + nx * overlap * 0.5, 35, WORLD_SIZE - 35);
+  b.y = clamp(b.y + ny * overlap * 0.5, 35, WORLD_SIZE - 35);
+  a.vx = (a.vx || 0) - nx * 24;
+  a.vy = (a.vy || 0) - ny * 24;
+  b.vx = (b.vx || 0) + nx * 24;
+  b.vy = (b.vy || 0) + ny * 24;
+}
+
+function applyBoatCollisions(now) {
+  const entities = [...players.values(), ...bots.values()];
+  for (let i = 0; i < entities.length; i++) {
+    for (let j = i + 1; j < entities.length; j++) {
+      const a = entities[i];
+      const b = entities[j];
+      const minDistance = (a.size + b.size) * 0.72;
+      if (distanceSq(a, b) > minDistance * minDistance) continue;
+      pushBoatsApart(a, b, minDistance);
+      const key = collisionKey(a, b);
+      if ((collisionCooldowns.get(key) || 0) > now) continue;
+      collisionCooldowns.set(key, now + COLLISION_COOLDOWN_MS);
+      if (a.allianceId && b.allianceId && a.allianceId === b.allianceId) continue;
+      const relativeSpeed = Math.hypot((a.vx || 0) - (b.vx || 0), (a.vy || 0) - (b.vy || 0));
+      const damage = clamp(5 + relativeSpeed * 0.08 + (a.size + b.size) * 0.055, 5, 48);
+      if (canDamage(a, b)) applyDamage(b, damage, a.id);
+      if (canDamage(b, a)) applyDamage(a, damage, b.id);
+    }
+  }
+  if (collisionCooldowns.size > 800) {
+    for (const [key, expiresAt] of collisionCooldowns) {
+      if (expiresAt < now) collisionCooldowns.delete(key);
+    }
+  }
 }
 
 function addWorldEffect(type, x, y, size = 1) {
@@ -811,6 +904,9 @@ function cleanup() {
   for (const item of mapItems.values()) {
     if (item.expiresAt < now) mapItems.delete(item.id);
   }
+  for (const [id, invite] of allianceInvites) {
+    if (invite.expiresAt < now) allianceInvites.delete(id);
+  }
   while (worldEffects.length && now - worldEffects[0].createdAt > 1400) worldEffects.shift();
 }
 
@@ -894,6 +990,92 @@ function compactStats() {
   };
 }
 
+function allianceMemberCount(allianceId) {
+  if (!allianceId) return 0;
+  return [...players.values()].filter((player) => player.allianceId === allianceId).length;
+}
+
+function pendingInviteBetween(a, b) {
+  const now = Date.now();
+  for (const invite of allianceInvites.values()) {
+    if (invite.expiresAt < now) continue;
+    if ((invite.fromId === a.id && invite.toId === b.id) || (invite.fromId === b.id && invite.toId === a.id)) return invite;
+  }
+  return null;
+}
+
+function sendAllianceList(socket, viewer) {
+  const now = Date.now();
+  const list = [...players.values()]
+    .filter((player) => player.id !== viewer.id)
+    .map((player) => ({
+      id: player.id,
+      name: player.name,
+      level: player.level,
+      distance: Math.round(distance(viewer, player)),
+      allied: !!viewer.allianceId && viewer.allianceId === player.allianceId,
+      pending: !!pendingInviteBetween(viewer, player),
+      inCombat: player.combatUntil > now
+    }))
+    .sort((a, b) => a.distance - b.distance)
+    .slice(0, 10);
+  socket.emit("allianceList", list);
+}
+
+function inviteAlliance(from, to) {
+  const now = Date.now();
+  if (!from || !to || from.id === to.id) return;
+  if (from.combatUntil > now) return io.to(from.id).emit("system", "You cannot invite while in combat.");
+  if (to.combatUntil > now) return io.to(from.id).emit("system", `${to.name} is in combat.`);
+  if (distance(from, to) > 5000) return io.to(from.id).emit("system", `${to.name} is too far away.`);
+  if (from.allianceId && allianceMemberCount(from.allianceId) >= 3) return io.to(from.id).emit("system", "Alliance is already full.");
+  if (to.allianceId && allianceMemberCount(to.allianceId) >= 3) return io.to(from.id).emit("system", `${to.name}'s alliance is full.`);
+  if (pendingInviteBetween(from, to)) return io.to(from.id).emit("system", "Alliance invite is already pending.");
+  const id = `invite-${nextInviteId++}`;
+  const invite = { id, fromId: from.id, toId: to.id, expiresAt: now + 30000 };
+  allianceInvites.set(id, invite);
+  io.to(from.id).emit("system", `Alliance invite sent to ${to.name}.`);
+  io.to(to.id).emit("allianceInvite", { id, fromId: from.id, fromName: from.name, expiresIn: 30 });
+  io.to(to.id).emit("system", `${from.name} invited you to an alliance. Use /accept ${from.name} or /decline ${from.name}.`);
+}
+
+function respondAllianceInvite(player, inviteId, accept) {
+  const now = Date.now();
+  const invite = allianceInvites.get(inviteId);
+  if (!invite || invite.toId !== player.id || invite.expiresAt < now) {
+    allianceInvites.delete(inviteId);
+    return io.to(player.id).emit("system", "Alliance invite expired.");
+  }
+  const from = players.get(invite.fromId);
+  if (!from) {
+    allianceInvites.delete(inviteId);
+    return io.to(player.id).emit("system", "Inviting player is offline.");
+  }
+  allianceInvites.delete(inviteId);
+  if (!accept) {
+    io.to(player.id).emit("system", "Alliance invite declined.");
+    io.to(from.id).emit("system", `${player.name} declined your alliance invite.`);
+    return;
+  }
+  if (from.combatUntil > now || player.combatUntil > now) return io.to(player.id).emit("system", "Alliance cannot be accepted during combat.");
+  const allianceId = from.allianceId || player.allianceId || `ally-${nextAllianceId++}`;
+  if (allianceMemberCount(allianceId) >= 3) return io.to(player.id).emit("system", "Alliance is already full.");
+  from.allianceId = allianceId;
+  player.allianceId = allianceId;
+  io.to(from.id).emit("system", `${player.name} accepted your alliance invite.`);
+  io.to(player.id).emit("system", `Alliance formed with ${from.name}.`);
+}
+
+function respondAllianceInviteByName(player, name, accept) {
+  const clean = sanitizeName(name).toLowerCase();
+  const invite = [...allianceInvites.values()].find((entry) => {
+    const from = players.get(entry.fromId);
+    return entry.toId === player.id && from && from.name.toLowerCase() === clean;
+  });
+  if (!invite) return io.to(player.id).emit("system", "No matching alliance invite found.");
+  respondAllianceInvite(player, invite.id, accept);
+}
+
 io.on("connection", (socket) => {
   socket.on("join", (payload = {}) => {
     if (players.has(socket.id)) players.delete(socket.id);
@@ -933,6 +1115,12 @@ io.on("connection", (socket) => {
   socket.on("chat", ({ channel, text } = {}) => {
     const player = players.get(socket.id);
     if (!player) return;
+    const raw = String(text || "").trim();
+    const command = raw.match(/^\/(accept|decline)\s+(.+)$/i);
+    if (command) {
+      respondAllianceInviteByName(player, command[2], command[1].toLowerCase() === "accept");
+      return;
+    }
     const clean = chatAllowed(player, text);
     if (!clean) {
       socket.emit("system", "Message blocked by chat filter.");
@@ -971,11 +1159,17 @@ io.on("connection", (socket) => {
       }
     }
     if (!nearest) return socket.emit("system", "No nearby player found.");
-    const allianceId = player.allianceId || nearest.allianceId || `ally-${nextAllianceId++}`;
-    player.allianceId = allianceId;
-    nearest.allianceId = allianceId;
-    io.to(player.id).emit("system", `Alliance formed with ${nearest.name}.`);
-    io.to(nearest.id).emit("system", `Alliance formed with ${player.name}.`);
+    inviteAlliance(player, nearest);
+  });
+
+  socket.on("inviteAlliance", (targetId) => {
+    inviteAlliance(players.get(socket.id), players.get(targetId));
+  });
+
+  socket.on("respondAllianceInvite", ({ inviteId, accept } = {}) => {
+    const player = players.get(socket.id);
+    if (!player) return;
+    respondAllianceInvite(player, inviteId, !!accept);
   });
 
   socket.on("leaveAlliance", () => {
@@ -1063,6 +1257,7 @@ setInterval(() => {
   updatePlayers(dt, now);
   updateBots(dt, now);
   updateProjectiles(dt, now);
+  applyBoatCollisions(now);
   cleanup();
 }, 1000 / TICK_RATE);
 
@@ -1076,7 +1271,10 @@ setInterval(() => {
 setInterval(() => {
   for (const socket of io.sockets.sockets.values()) {
     const player = players.get(socket.id);
-    if (player) socket.emit("minimap", compactMinimap(player));
+    if (player) {
+      socket.emit("minimap", compactMinimap(player));
+      sendAllianceList(socket, player);
+    }
   }
 }, 1000 / MINIMAP_SEND_RATE);
 

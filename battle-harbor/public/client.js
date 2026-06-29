@@ -16,6 +16,11 @@ const upgradePanel = document.getElementById("upgradePanel");
 const selectedShipPreview = document.getElementById("selectedShipPreview");
 const connectionStatus = document.getElementById("connectionStatus");
 const debugPanel = document.getElementById("debugPanel");
+const mobileControls = document.getElementById("mobileControls");
+const portraitHint = document.getElementById("portraitHint");
+const joystick = document.getElementById("joystick");
+const joystickKnob = document.getElementById("joystickKnob");
+const allianceList = document.getElementById("allianceList");
 
 const upgradeBaseCosts = { hp: 300, speed: 350, turn: 250, damage: 500, reload: 600, boost: 400 };
 const upgradeLabels = { hp: "HP", speed: "Speed", turn: "Turn", damage: "Damage", reload: "Reload", boost: "Boost" };
@@ -69,6 +74,8 @@ let frameCount = 0;
 let fps = 0;
 let lastPerfSample = performance.now();
 const keys = {};
+const touchInput = { up: false, down: false, left: false, right: false, shoot: false, boost: false, active: false, angle: null };
+let alliancePlayers = [];
 
 function loadProgress() {
   const fallback = { nickname: "", securedPoints: 0, level: 1, xp: 0, unlockedShips: ["Dinghy"], selectedShip: "Dinghy", shipUpgrades: defaultShipUpgrades() };
@@ -663,6 +670,15 @@ function drawMinimap() {
   mctx.clearRect(0, 0, w, w);
   mctx.fillStyle = "#061827";
   mctx.fillRect(0, 0, w, w);
+  for (const object of state.mapObjects || state.obstacles || []) {
+    const x = object.x * scale;
+    const y = object.y * scale;
+    const r = Math.max(1.2, object.r * scale);
+    mctx.fillStyle = object.type === "island" ? "rgba(216,189,119,0.82)" : object.type === "rock" || object.type === "stone" ? "rgba(150,166,174,0.72)" : "rgba(110,125,135,0.38)";
+    mctx.beginPath();
+    mctx.arc(x, y, r, 0, Math.PI * 2);
+    mctx.fill();
+  }
   mctx.fillStyle = "rgba(86,214,134,0.18)";
   mctx.beginPath();
   mctx.arc(state.safeZone.x * scale, state.safeZone.y * scale, state.safeZone.radius * scale, 0, Math.PI * 2);
@@ -701,6 +717,10 @@ function drawMinimap() {
   }
   mctx.fillStyle = "rgba(245,251,255,0.72)";
   mctx.font = "9px Segoe UI";
+  mctx.fillText("N", w / 2 - 3, 10);
+  mctx.fillText("S", w / 2 - 3, w - 6);
+  mctx.fillText("W", 6, w / 2 + 3);
+  mctx.fillText("E", w - 12, w / 2 + 3);
   mctx.fillText("P", 8, w - 24);
   mctx.fillStyle = "#56d686";
   mctx.fillText("A", 24, w - 24);
@@ -767,6 +787,7 @@ function updateHud() {
   document.getElementById("harborInfo").textContent = `Harbor: ${directionFromTo(mine, state.safeZone)}`;
   document.getElementById("botInfo").textContent = `Bots online: ${state.botCount || state.bots.length} / ${state.botTarget || state.bots.length}`;
   document.getElementById("allianceStatus").textContent = mine.allianceId ? "Alliance active" : "No alliance";
+  renderAllianceList();
   document.querySelector(".map-panel").classList.toggle("hidden", !minimapVisible);
   debugPanel.classList.toggle("hidden", !debugVisible);
   if (debugVisible) {
@@ -783,6 +804,27 @@ function updateHud() {
       `Minimap Hz: ${serverStats.minimapHz ?? "--"}`,
       `Socket: ${socketStatus}`
     ].join("\n");
+  }
+}
+
+function renderAllianceList() {
+  if (!allianceList) return;
+  if (!joined || !alliancePlayers.length) {
+    allianceList.innerHTML = "";
+    return;
+  }
+  allianceList.innerHTML = "";
+  for (const player of alliancePlayers) {
+    const row = document.createElement("div");
+    row.className = `alliance-row ${player.allied ? "allied" : ""}`;
+    const status = player.allied ? "Allied" : player.pending ? "Pending" : player.inCombat ? "Combat" : "Invite";
+    row.innerHTML = `<div><strong>${player.name}</strong><small>Lv ${player.level} | ${player.distance}m | ${status}</small></div>`;
+    const button = document.createElement("button");
+    button.textContent = player.allied ? "Ally" : player.pending ? "Wait" : "Invite";
+    button.disabled = player.allied || player.pending || player.inCombat;
+    button.addEventListener("click", () => socket.emit("inviteAlliance", player.id));
+    row.appendChild(button);
+    allianceList.appendChild(row);
   }
 }
 
@@ -813,17 +855,18 @@ function gameLoop() {
 
 function sendInput() {
   if (!joined || document.activeElement === chatInput) return;
-  const angle = Math.atan2(mouse.y - innerHeight / 2, mouse.x - innerWidth / 2);
-  const shoot = !!(keys[" "] || keys.mouse);
+  const mine = me();
+  const angle = touchInput.angle ?? Math.atan2(mouse.y - innerHeight / 2, mouse.x - innerWidth / 2);
+  const shoot = !!(keys[" "] || keys.mouse || touchInput.shoot);
   if (shoot) lastShotVisual = performance.now();
   socket.emit("input", {
-    up: keys.w || keys.arrowup,
-    down: keys.s || keys.arrowdown,
-    left: keys.a || keys.arrowleft,
-    right: keys.d || keys.arrowright,
+    up: !!(keys.w || keys.arrowup || touchInput.up),
+    down: !!(keys.s || keys.arrowdown || touchInput.down),
+    left: !!(keys.a || keys.arrowleft || touchInput.left),
+    right: !!(keys.d || keys.arrowright || touchInput.right),
     shoot,
-    boost: keys.shift,
-    aimAngle: angle
+    boost: !!(keys.shift || touchInput.boost),
+    aimAngle: Number.isFinite(angle) ? angle : mine?.angle || 0
   });
 }
 
@@ -842,6 +885,7 @@ playButton.addEventListener("click", () => {
   startScreen.classList.add("hidden");
   hud.classList.remove("hidden");
   joined = true;
+  updateMobileVisibility();
 });
 
 document.getElementById("exitButton").addEventListener("click", () => socket.emit("startExit"));
@@ -896,6 +940,78 @@ window.addEventListener("mouseup", () => {
   keys.mouse = false;
 });
 
+function updateMobileVisibility() {
+  const mobile = window.matchMedia("(pointer: coarse), (max-width: 760px)").matches;
+  mobileControls.classList.toggle("hidden", !joined || !mobile);
+  portraitHint.classList.toggle("hidden", !joined || !mobile || innerWidth > innerHeight);
+}
+
+function resetJoystick() {
+  touchInput.up = false;
+  touchInput.down = false;
+  touchInput.left = false;
+  touchInput.right = false;
+  touchInput.active = false;
+  touchInput.angle = null;
+  joystickKnob.style.transform = "translate(0px, 0px)";
+}
+
+function handleJoystick(clientX, clientY) {
+  const rect = joystick.getBoundingClientRect();
+  const cx = rect.left + rect.width / 2;
+  const cy = rect.top + rect.height / 2;
+  const dx = clientX - cx;
+  const dy = clientY - cy;
+  const length = Math.min(48, Math.hypot(dx, dy));
+  const angle = Math.atan2(dy, dx);
+  const nx = Math.cos(angle) * length;
+  const ny = Math.sin(angle) * length;
+  joystickKnob.style.transform = `translate(${nx}px, ${ny}px)`;
+  touchInput.active = true;
+  touchInput.up = ny < -18;
+  touchInput.down = ny > 22;
+  touchInput.left = nx < -18;
+  touchInput.right = nx > 18;
+  touchInput.angle = Math.atan2(ny, nx);
+}
+
+joystick.addEventListener("pointerdown", (event) => {
+  joystick.setPointerCapture(event.pointerId);
+  handleJoystick(event.clientX, event.clientY);
+});
+
+joystick.addEventListener("pointermove", (event) => {
+  if (touchInput.active) handleJoystick(event.clientX, event.clientY);
+});
+
+joystick.addEventListener("pointerup", resetJoystick);
+joystick.addEventListener("pointercancel", resetJoystick);
+
+function bindTouchButton(id, key, onTap) {
+  const button = document.getElementById(id);
+  button.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    if (key) touchInput[key] = true;
+    if (onTap) onTap();
+  });
+  button.addEventListener("pointerup", () => {
+    if (key) touchInput[key] = false;
+  });
+  button.addEventListener("pointercancel", () => {
+    if (key) touchInput[key] = false;
+  });
+}
+
+bindTouchButton("touchShoot", "shoot");
+bindTouchButton("touchBoost", "boost");
+bindTouchButton("touchExit", null, () => socket.emit("startExit"));
+bindTouchButton("touchMap", null, () => {
+  minimapVisible = !minimapVisible;
+});
+
+window.addEventListener("contextmenu", (event) => event.preventDefault());
+window.addEventListener("touchmove", (event) => event.preventDefault(), { passive: false });
+
 socket.on("connect", () => {
   socketStatus = "Connected";
 });
@@ -943,6 +1059,28 @@ socket.on("serverStats", (stats) => {
   serverStats = stats;
 });
 
+socket.on("allianceList", (players) => {
+  alliancePlayers = Array.isArray(players) ? players : [];
+  renderAllianceList();
+});
+
+socket.on("allianceInvite", (invite) => {
+  const line = document.createElement("div");
+  line.innerHTML = `[Alliance] System: ${invite.fromName} invited you.`;
+  const actions = document.createElement("div");
+  actions.className = "invite-actions";
+  const accept = document.createElement("button");
+  accept.textContent = "Accept";
+  accept.addEventListener("click", () => socket.emit("respondAllianceInvite", { inviteId: invite.id, accept: true }));
+  const decline = document.createElement("button");
+  decline.textContent = "Decline";
+  decline.addEventListener("click", () => socket.emit("respondAllianceInvite", { inviteId: invite.id, accept: false }));
+  actions.append(accept, decline);
+  line.appendChild(actions);
+  chatMessages.appendChild(line);
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+});
+
 socket.on("pingPong", (sentAt) => {
   pingMs = Math.max(0, Math.round(performance.now() - sentAt));
 });
@@ -965,6 +1103,7 @@ socket.on("lobbyLeft", () => {
   keys.mouse = false;
   startScreen.classList.remove("hidden");
   hud.classList.add("hidden");
+  updateMobileVisibility();
   renderShipCards();
 });
 
@@ -972,8 +1111,12 @@ setInterval(sendInput, 1000 / 30);
 setInterval(() => {
   if (socket.connected) socket.emit("pingCheck", performance.now());
 }, 2000);
-window.addEventListener("resize", resize);
+window.addEventListener("resize", () => {
+  resize();
+  updateMobileVisibility();
+});
 nicknameInput.value = progress.nickname || "";
 renderShipCards();
 resize();
+updateMobileVisibility();
 gameLoop();

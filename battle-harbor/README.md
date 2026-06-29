@@ -134,9 +134,9 @@ Performance model:
 - Temporary loot is risky and can be lost on death.
 - Entering Harbor immediately secures temporary loot.
 - Outside Harbor, pressing E starts a 90-second exit. Survive the countdown to secure loot and return to Harbor.
-- Bots are managed by a population manager: about 45 bots for one player, +5 per extra player, capped at 70.
+- Bots are managed by a population manager: `targetBots = clamp(150 - playerCount * 15, 45, 150)`. Set `SERVER_PERFORMANCE_MODE=1` for a lower 90-bot cap on small hosting plans.
 - Bots spawn away from Harbor, players, obstacles, loot, and items. Coast gets mostly weak bots, Wreck Field gets medium bots, and Storm/Deep Water gets stronger bots.
-- Bots use role-based AI: ScoutBot circles, RaiderBot pressures, GunnerBot keeps range, TankBot advances slowly, and rare EliteBots are stronger endgame targets.
+- Bots can use all 25 ship classes with weighted rarity. Strong endgame bot ships are much rarer and appear mainly farther from beginner areas.
 - Destroyed bots grant loot and XP. Kill loot is split between the last hitter and assisting damage dealers.
 - Destroyed players keep secured points but lose temporary loot. Half of that temporary loot drops as a crate.
 - After 5 seconds without taking damage, players regenerate 5% max HP per second until full HP.
@@ -144,8 +144,9 @@ Performance model:
 - Boost Battery items recharge boost energy by up to 50 points.
 - Boost energy is server-authoritative. Holding Shift drains energy; letting go stops boost. Energy slowly regenerates after 8 seconds without boosting.
 - Back to Lobby removes the player from the world. Temporary loot is lost after confirmation, but secured progress remains.
-- Alliances are simple in version 1.0: use "Ally nearest" near another player to form a group of up to three players.
-- The minimap shows the whole map: own ship in white, other players in blue, allies in green, bots in red/orange, Harbor, loot, and items.
+- Alliances use server-authoritative invites. Use the player list, "Ally nearest", `/accept name`, `/decline name`, or the Accept/Decline buttons. Alliances are capped at three players and cannot be formed during combat.
+- The minimap shows the whole map: own ship in white, other players in blue, allies in green, bots in red/orange, strong bots larger/orange, Harbor, land, rocks, loot, items, and N/S/E/W labels.
+- Mobile browsers get touch controls: virtual joystick, Fire, Boost, Exit, and Map buttons. Landscape orientation is recommended.
 - Chat has Global and Alliance channels. A simple server-side filter blocks long messages, spam, repeated characters, and placeholder banned words.
 
 ## Ships
@@ -183,7 +184,7 @@ battle-harbor/
 - Local progress can be edited by a player because there are no accounts or database yet.
 - Ship purchase and local progress are intentionally lightweight for this first version.
 - The chat filter uses a small placeholder banned-word list that should be expanded before public use.
-- Alliance creation is one-button proximity pairing instead of a full invite and accept flow.
+- Alliance invites are in-memory only. They reset when the server restarts.
 - Bot-vs-bot kills do not create player loot unless a player contributed damage.
 - The large map uses fixed procedural-style objects, not streamed map chunks.
 - Spawn protection is time-based only; there is no visual collision grace period after it ends.
@@ -195,9 +196,7 @@ battle-harbor/
 ## Next Planned Features For 1.1
 
 - Better bot pathfinding around islands and rocks.
-- Invite and accept flow for alliances.
 - More ships and deeper weapon tuning.
 - Stronger server validation for local progress and ship ownership.
 - Sound effects made in-house or generated specifically for the project.
-- Better mobile layout and optional touch controls.
 - More interesting map zones, hazards, and visual effects.
