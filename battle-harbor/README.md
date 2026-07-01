@@ -134,11 +134,18 @@ Performance model:
 - Temporary loot is risky and can be lost on death.
 - Entering Harbor immediately secures temporary loot.
 - Outside Harbor, pressing E starts a 90-second exit. Survive the countdown to secure loot and return to Harbor.
-- Bots are managed by a population manager: `targetBots = clamp(150 - playerCount * 15, 45, 150)`. Set `SERVER_PERFORMANCE_MODE=1` for a lower 90-bot cap on small hosting plans.
+- Bots are managed by a population manager: `targetBots = clamp(100 + playerCount * 5, 100, 150)`. Set `SERVER_PERFORMANCE_MODE=1` for a lower 120-bot cap on small hosting plans.
 - Server simulation runs at 30 Hz, detailed client state at 10 Hz, minimap at 1 Hz, and stats/debug data at 1 Hz.
 - Clients receive detailed data only for nearby objects around the player. Static map objects are sent once on join.
 - Minimap updates stay compact: every boat is shown, but only small fields like id, type, position, and size class are sent.
+- Control Mode can be selected in the lobby: Keyboard + Mouse, Touch, or Hybrid. Desktop defaults to Keyboard + Mouse; mobile defaults to Touch. The choice is saved in `localStorage`.
+- HUD Settings include Touch Controls, Chat open/closed, Minimap size, and HUD scale. These settings are saved locally.
+- Client rendering smooths ships with interpolated render positions/angles, so movement stays fluid even with 10 Hz state updates.
+- Press Z or use the mouse wheel to switch zoom between Close, Normal, and Wide.
 - Bots spawn away from Harbor, players, obstacles, loot, and items. Coast gets mostly weak bots, Wreck Field gets medium bots, and Storm/Deep Water gets stronger bots.
+- Bot population targets 100-150 bots: `targetBots = clamp(100 + playerCount * 5, 100, 150)`.
+- Bots use a slot pool. When a large or elite bot dies, that slot respawns the same bot type after a delay instead of replacing it with a random small bot.
+- Bots use LOD AI: Full AI near players, Medium AI at mid distance, and Sleep AI far away. All bots remain visible on the minimap.
 - Bots can use all 25 ship classes with weighted rarity. Coast has mostly small/medium bots, Wreck Field adds more large bots, and Storm/Deep Water has more large and elite bots.
 - Large and elite bots are visually larger, have stronger outlines, heavier wake, extra weapons/armor, and larger minimap markers.
 - Destroyed ships grant loot and XP only to the player who lands the final hit. Assist loot has been removed.
@@ -153,7 +160,7 @@ Performance model:
 - The minimap shows the whole map: own ship in white, other players in blue, allies in green, bots in red/orange, strong bots larger/orange, Harbor, land, rocks, loot, items, and N/S/E/W labels.
 - Mobile browsers get touch controls: virtual joystick, Fire, Boost, Exit, and Map buttons. Landscape orientation is recommended.
 - Chat has Global and Alliance channels. A simple server-side filter blocks long messages, spam, repeated characters, and placeholder banned words.
-- Press F3 to show debug data: FPS, ping, online players, total/visible bots, total/visible projectiles, network updates, payload sizes, and server tick time.
+- Press F3 to show debug data: FPS, ping, online players, total/visible bots, Full/Medium/Sleep AI bot counts, total/visible projectiles, control mode, network updates, payload sizes, and server tick time.
 
 ## Ships
 

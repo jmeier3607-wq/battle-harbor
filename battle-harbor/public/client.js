@@ -21,6 +21,13 @@ const portraitHint = document.getElementById("portraitHint");
 const joystick = document.getElementById("joystick");
 const joystickKnob = document.getElementById("joystickKnob");
 const allianceList = document.getElementById("allianceList");
+const controlModeSelect = document.getElementById("controlModeSelect");
+const settingsButton = document.getElementById("settingsButton");
+const hudSettings = document.getElementById("hudSettings");
+const touchToggle = document.getElementById("touchToggle");
+const chatToggle = document.getElementById("chatToggle");
+const minimapSizeSelect = document.getElementById("minimapSizeSelect");
+const hudScaleSelect = document.getElementById("hudScaleSelect");
 
 const upgradeBaseCosts = { hp: 300, speed: 350, turn: 250, damage: 500, reload: 600, boost: 400 };
 const upgradeLabels = { hp: "HP", speed: "Speed", turn: "Turn", damage: "Damage", reload: "Reload", boost: "Boost" };
@@ -71,9 +78,15 @@ let serverStats = {};
 let netUpdates = 0;
 let netRate = 0;
 let lastPayloadKb = 0;
+let controlMode = localStorage.getItem("battleHarborControlMode") || (matchMedia("(pointer: coarse)").matches ? "touch" : "keyboard");
+let hudSettingsState = JSON.parse(localStorage.getItem("battleHarborHudSettings") || "{}");
+let zoomMode = localStorage.getItem("battleHarborZoomMode") || "normal";
+const zoomScales = { close: 1.14, normal: 1, wide: 0.84 };
+const renderEntities = new Map();
 let frameCount = 0;
 let fps = 0;
 let lastPerfSample = performance.now();
+let lastFrameTime = performance.now();
 const keys = {};
 const touchInput = { up: false, down: false, left: false, right: false, shoot: false, boost: false, active: false, angle: null };
 let alliancePlayers = [];
@@ -114,6 +127,29 @@ function normalizeShipUpgrades(source = {}) {
 function saveProgress() {
   progress.nickname = nicknameInput.value.trim() || progress.nickname || "Captain";
   localStorage.setItem("battleHarborProgress", JSON.stringify(progress));
+}
+
+function saveHudSettings() {
+  localStorage.setItem("battleHarborHudSettings", JSON.stringify(hudSettingsState));
+}
+
+function applyHudSettings() {
+  document.body.classList.toggle("chat-collapsed", hudSettingsState.chatOpen === false);
+  document.body.classList.toggle("minimap-small", hudSettingsState.minimapSize === "small");
+  document.body.classList.toggle("hud-small", hudSettingsState.hudScale === "small");
+  document.body.classList.toggle("hud-large", hudSettingsState.hudScale === "large");
+  chatToggle.checked = hudSettingsState.chatOpen !== false;
+  minimapSizeSelect.value = hudSettingsState.minimapSize || "normal";
+  hudScaleSelect.value = hudSettingsState.hudScale || "normal";
+}
+
+function applyControlMode() {
+  document.body.classList.remove("control-keyboard", "control-touch", "control-hybrid");
+  document.body.classList.add(`control-${controlMode}`);
+  controlModeSelect.value = controlMode;
+  touchToggle.checked = controlMode !== "keyboard";
+  localStorage.setItem("battleHarborControlMode", controlMode);
+  updateMobileVisibility();
 }
 
 function resize() {
@@ -200,15 +236,79 @@ function me() {
   return state?.players.find((p) => p.id === myId);
 }
 
+function ingestEntity(entity) {
+  const existing = renderEntities.get(entity.id);
+  if (!existing) {
+    renderEntities.set(entity.id, { x: entity.x, y: entity.y, angle: entity.angle || 0 });
+    entity.renderX = entity.x;
+    entity.renderY = entity.y;
+    entity.renderAngle = entity.angle || 0;
+    return entity;
+  }
+  entity.serverX = entity.x;
+  entity.serverY = entity.y;
+  entity.serverAngle = entity.angle || 0;
+  entity.renderX = existing.x;
+  entity.renderY = existing.y;
+  entity.renderAngle = existing.angle;
+  return entity;
+}
+
+function ingestState(nextState) {
+  const seen = new Set();
+  nextState.players = (nextState.players || []).map((entity) => {
+    seen.add(entity.id);
+    return ingestEntity(entity);
+  });
+  nextState.bots = (nextState.bots || []).map((entity) => {
+    seen.add(entity.id);
+    return ingestEntity(entity);
+  });
+  for (const id of renderEntities.keys()) {
+    if (!seen.has(id)) renderEntities.delete(id);
+  }
+  return nextState;
+}
+
+function smoothAngle(current, target, amount) {
+  let delta = target - current;
+  while (delta > Math.PI) delta -= Math.PI * 2;
+  while (delta < -Math.PI) delta += Math.PI * 2;
+  return current + delta * amount;
+}
+
+function smoothEntities(dt) {
+  if (!state) return;
+  const amount = Math.min(1, dt * 12);
+  for (const collection of [state.players || [], state.bots || []]) {
+    for (const entity of collection) {
+      const render = renderEntities.get(entity.id);
+      if (!render) continue;
+      const targetX = entity.serverX ?? entity.x;
+      const targetY = entity.serverY ?? entity.y;
+      const targetAngle = entity.serverAngle ?? entity.angle ?? 0;
+      const correction = entity.id === myId ? Math.min(1, dt * 7) : amount;
+      render.x += (targetX - render.x) * correction;
+      render.y += (targetY - render.y) * correction;
+      render.angle = smoothAngle(render.angle, targetAngle, amount);
+      entity.renderX = render.x;
+      entity.renderY = render.y;
+      entity.renderAngle = render.angle;
+    }
+  }
+}
+
 function worldToScreen(x, y) {
-  return { x: x - camera.x + innerWidth / 2, y: y - camera.y + innerHeight / 2 };
+  const scale = zoomScales[zoomMode] || 1;
+  return { x: (x - camera.x) * scale + innerWidth / 2, y: (y - camera.y) * scale + innerHeight / 2 };
 }
 
 function isNearCamera(x, y, radius = 120) {
-  return x > camera.x - innerWidth / 2 - radius &&
-    x < camera.x + innerWidth / 2 + radius &&
-    y > camera.y - innerHeight / 2 - radius &&
-    y < camera.y + innerHeight / 2 + radius;
+  const scale = zoomScales[zoomMode] || 1;
+  return x > camera.x - innerWidth / (2 * scale) - radius &&
+    x < camera.x + innerWidth / (2 * scale) + radius &&
+    y > camera.y - innerHeight / (2 * scale) - radius &&
+    y < camera.y + innerHeight / (2 * scale) + radius;
 }
 
 function drawWater() {
@@ -356,7 +456,10 @@ function drawMapObject(object) {
 }
 
 function drawShip(entity, kind) {
-  const p = worldToScreen(entity.x, entity.y);
+  const drawX = entity.renderX ?? entity.x;
+  const drawY = entity.renderY ?? entity.y;
+  const drawAngle = entity.renderAngle ?? entity.angle;
+  const p = worldToScreen(drawX, drawY);
   if (p.x < -entity.size * 2 || p.y < -entity.size * 2 || p.x > innerWidth + entity.size * 2 || p.y > innerHeight + entity.size * 2) return;
   const mine = entity.id === myId;
   const mineEntity = me();
@@ -368,7 +471,7 @@ function drawShip(entity, kind) {
   if (bigBot) {
     ctx.fillStyle = eliteBot ? "rgba(255, 88, 44, 0.18)" : "rgba(255, 180, 72, 0.12)";
     ctx.beginPath();
-    ctx.ellipse(p.x + 5, p.y + 10, entity.size * 1.75, entity.size * 1.05, entity.angle, 0, Math.PI * 2);
+    ctx.ellipse(p.x + 5, p.y + 10, entity.size * 1.75, entity.size * 1.05, drawAngle, 0, Math.PI * 2);
     ctx.fill();
   }
   if (eliteBot) {
@@ -396,15 +499,15 @@ function drawShip(entity, kind) {
     ctx.lineWidth = entity.boosting ? 4 : bigBot ? 3 : 2;
     const wake = entity.boosting ? entity.size * 1.9 : bigBot ? entity.size * 1.65 : entity.size * 1.35;
     ctx.beginPath();
-    ctx.moveTo(p.x - Math.cos(entity.angle) * entity.size * 0.7, p.y - Math.sin(entity.angle) * entity.size * 0.7);
-    ctx.lineTo(p.x - Math.cos(entity.angle) * wake + Math.sin(entity.angle) * 12, p.y - Math.sin(entity.angle) * wake - Math.cos(entity.angle) * 12);
-    ctx.moveTo(p.x - Math.cos(entity.angle) * entity.size * 0.7, p.y - Math.sin(entity.angle) * entity.size * 0.7);
-    ctx.lineTo(p.x - Math.cos(entity.angle) * wake - Math.sin(entity.angle) * 12, p.y - Math.sin(entity.angle) * wake + Math.cos(entity.angle) * 12);
+    ctx.moveTo(p.x - Math.cos(drawAngle) * entity.size * 0.7, p.y - Math.sin(drawAngle) * entity.size * 0.7);
+    ctx.lineTo(p.x - Math.cos(drawAngle) * wake + Math.sin(drawAngle) * 12, p.y - Math.sin(drawAngle) * wake - Math.cos(drawAngle) * 12);
+    ctx.moveTo(p.x - Math.cos(drawAngle) * entity.size * 0.7, p.y - Math.sin(drawAngle) * entity.size * 0.7);
+    ctx.lineTo(p.x - Math.cos(drawAngle) * wake - Math.sin(drawAngle) * 12, p.y - Math.sin(drawAngle) * wake + Math.cos(drawAngle) * 12);
     ctx.stroke();
   }
   ctx.save();
   ctx.translate(p.x, p.y);
-  ctx.rotate(entity.angle);
+  ctx.rotate(drawAngle);
   drawShipBody(entity.ship || "Dinghy", entity.size, accent, statusColor, kind === "bot");
   if (entity.hitFlash) {
     ctx.globalCompositeOperation = "screen";
@@ -809,8 +912,9 @@ function updateHud() {
   document.getElementById("tempLoot").textContent = mine.temporaryLoot;
   document.getElementById("securedPoints").textContent = progress.securedPoints;
   const reloadReady = 1 - (mine.reloadRemaining || 0);
-  const reloadText = reloadReady >= 1 ? "Ready" : `Reload: ${(mine.reloadMs / 1000).toFixed(1)}s`;
+  const reloadText = reloadReady >= 1 ? "READY" : `Reload: ${(mine.reloadMs / 1000).toFixed(1)}s`;
   document.getElementById("weaponText").textContent = `${shipDefinitions[mine.ship]?.weapon || "Cannon"} | ${reloadText}`;
+  document.getElementById("boostText").textContent = boostPercent <= 0 ? "BOOST EMPTY" : `BOOST ${Math.round(mine.boostEnergy)}/${Math.round(mine.boostMax)}`;
   document.getElementById("reloadBar").style.width = `${Math.round(reloadReady * 100)}%`;
   document.getElementById("exitStatus").textContent = mine.exiting ? `EXITING: ${mine.exitRemaining}s` : "";
   const effects = [];
@@ -841,6 +945,10 @@ function updateHud() {
       `Net updates/s: ${netRate}`,
       `Last payload: ${lastPayloadKb.toFixed(2)} KB`,
       `Server tick: ${serverStats.avgTickMs ?? "--"} ms`,
+      `Full AI: ${serverStats.fullAiBots ?? "--"}`,
+      `Medium AI: ${serverStats.mediumAiBots ?? "--"}`,
+      `Sleep AI: ${serverStats.sleepBots ?? "--"}`,
+      `Control: ${controlMode}`,
       `State payload: ${serverStats.statePayloadKb ?? "--"} KB`,
       `Minimap payload: ${serverStats.minimapPayloadKb ?? "--"} KB`,
       `State Hz: ${serverStats.stateHz ?? "--"}`,
@@ -874,6 +982,8 @@ function renderAllianceList() {
 function gameLoop() {
   frameCount++;
   const now = performance.now();
+  const dt = Math.min(0.05, (now - lastFrameTime) / 1000);
+  lastFrameTime = now;
   if (now - lastPerfSample >= 1000) {
     fps = frameCount;
     netRate = netUpdates;
@@ -881,10 +991,13 @@ function gameLoop() {
     netUpdates = 0;
     lastPerfSample = now;
   }
+  smoothEntities(dt);
   const mine = me();
   if (mine) {
-    camera.x += (mine.x - camera.x) * 0.18;
-    camera.y += (mine.y - camera.y) * 0.18;
+    const targetX = mine.renderX ?? mine.x;
+    const targetY = mine.renderY ?? mine.y;
+    camera.x += (targetX - camera.x) * Math.min(1, dt * 8);
+    camera.y += (targetY - camera.y) * Math.min(1, dt * 8);
   }
   drawWater();
   if (state) {
@@ -921,6 +1034,7 @@ function addChat({ channel, name, text }) {
 }
 
 playButton.addEventListener("click", () => {
+  if (joined) return;
   progress.nickname = nicknameInput.value.trim() || "Captain";
   progress.selectedShip = selectedShip;
   saveProgress();
@@ -939,6 +1053,30 @@ document.getElementById("backLobbyButton").addEventListener("click", () => {
 });
 document.getElementById("allyButton").addEventListener("click", () => socket.emit("allyNearest"));
 document.getElementById("leaveAllyButton").addEventListener("click", () => socket.emit("leaveAlliance"));
+settingsButton.addEventListener("click", () => hudSettings.classList.toggle("hidden"));
+controlModeSelect.addEventListener("change", () => {
+  controlMode = controlModeSelect.value;
+  applyControlMode();
+});
+touchToggle.addEventListener("change", () => {
+  controlMode = touchToggle.checked ? (matchMedia("(pointer: coarse)").matches ? "touch" : "hybrid") : "keyboard";
+  applyControlMode();
+});
+chatToggle.addEventListener("change", () => {
+  hudSettingsState.chatOpen = chatToggle.checked;
+  saveHudSettings();
+  applyHudSettings();
+});
+minimapSizeSelect.addEventListener("change", () => {
+  hudSettingsState.minimapSize = minimapSizeSelect.value;
+  saveHudSettings();
+  applyHudSettings();
+});
+hudScaleSelect.addEventListener("change", () => {
+  hudSettingsState.hudScale = hudScaleSelect.value;
+  saveHudSettings();
+  applyHudSettings();
+});
 
 chatInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && chatInput.value.trim()) {
@@ -961,6 +1099,12 @@ window.addEventListener("keydown", (event) => {
     debugVisible = !debugVisible;
     return;
   }
+  if (key === "z") {
+    const modes = ["close", "normal", "wide"];
+    zoomMode = modes[(modes.indexOf(zoomMode) + 1) % modes.length];
+    localStorage.setItem("battleHarborZoomMode", zoomMode);
+    return;
+  }
   keys[key] = true;
   if (key === "e") socket.emit("startExit");
   if (key === "m") minimapVisible = !minimapVisible;
@@ -979,14 +1123,21 @@ canvas.addEventListener("mousedown", () => {
   keys.mouse = true;
 });
 
+canvas.addEventListener("wheel", (event) => {
+  event.preventDefault();
+  if (event.deltaY > 0) zoomMode = "wide";
+  else zoomMode = zoomMode === "wide" ? "normal" : "close";
+  localStorage.setItem("battleHarborZoomMode", zoomMode);
+}, { passive: false });
+
 window.addEventListener("mouseup", () => {
   keys.mouse = false;
 });
 
 function updateMobileVisibility() {
-  const mobile = window.matchMedia("(pointer: coarse), (max-width: 760px)").matches;
-  mobileControls.classList.toggle("hidden", !joined || !mobile);
-  portraitHint.classList.toggle("hidden", !joined || !mobile || innerWidth > innerHeight);
+  const showTouch = joined && controlMode !== "keyboard";
+  mobileControls.classList.toggle("hidden", !showTouch);
+  portraitHint.classList.toggle("hidden", !showTouch || innerWidth > innerHeight || controlMode === "keyboard");
 }
 
 function resetJoystick() {
@@ -1086,7 +1237,7 @@ socket.on("joined", ({ id, worldSize, safeZone, obstacles, mapObjects }) => {
 socket.on("state", (nextState) => {
   netUpdates++;
   lastPayloadKb = new Blob([JSON.stringify(nextState)]).size / 1024;
-  state = { ...staticWorld, ...nextState };
+  state = { ...staticWorld, ...ingestState(nextState) };
   const mine = me();
   if (mine) {
     progress.securedPoints = mine.securedPoints;
@@ -1144,6 +1295,7 @@ socket.on("lobbyLeft", () => {
   myId = null;
   state = null;
   minimapState = null;
+  renderEntities.clear();
   keys.mouse = false;
   startScreen.classList.remove("hidden");
   hud.classList.add("hidden");
@@ -1160,6 +1312,8 @@ window.addEventListener("resize", () => {
   updateMobileVisibility();
 });
 nicknameInput.value = progress.nickname || "";
+applyHudSettings();
+applyControlMode();
 renderShipCards();
 resize();
 updateMobileVisibility();

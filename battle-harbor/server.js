@@ -14,7 +14,7 @@ const WORLD_SIZE = 20000;
 const TICK_RATE = 30;
 const STATE_SEND_RATE = 10;
 const MINIMAP_SEND_RATE = 1;
-const VIEW_DISTANCE = 3000;
+const VIEW_DISTANCE = 3500;
 const VIEW_DISTANCE_SQ = VIEW_DISTANCE * VIEW_DISTANCE;
 const BOT_ACTIVE_DISTANCE = 3600;
 const BOT_ACTIVE_DISTANCE_SQ = BOT_ACTIVE_DISTANCE * BOT_ACTIVE_DISTANCE;
@@ -24,9 +24,12 @@ const SPEED_MULTIPLIER = 1.18;
 const ACCELERATION_MULTIPLIER = 1.14;
 const TURN_MULTIPLIER = 1.06;
 const SERVER_PERFORMANCE_MODE = process.env.SERVER_PERFORMANCE_MODE === "1";
-const MAX_BOTS_BASE = SERVER_PERFORMANCE_MODE ? 90 : 150;
-const MIN_TOTAL_BOTS = 45;
-const BOTS_REMOVED_PER_PLAYER = 15;
+const MIN_TOTAL_BOTS = 100;
+const BASE_BOT_TARGET = 100;
+const BOTS_PER_PLAYER_ONLINE = 5;
+const MAX_TOTAL_BOTS = SERVER_PERFORMANCE_MODE ? 120 : 150;
+const MEDIUM_AI_DISTANCE = 7000;
+const MEDIUM_AI_DISTANCE_SQ = MEDIUM_AI_DISTANCE * MEDIUM_AI_DISTANCE;
 const COLLISION_COOLDOWN_MS = 500;
 const SPAWN_PROTECTION_MS = 5000;
 const HEAL_DELAY_MS = 5000;
@@ -47,6 +50,9 @@ app.get("/health", (req, res) => {
     status: "ok",
     players: players.size,
     bots: bots.size,
+    fullAiBots: lastAiCounts.full,
+    mediumAiBots: lastAiCounts.medium,
+    sleepBots: lastAiCounts.sleep,
     projectiles: projectiles.size,
     avgTickMs: round2(avgTickMs),
     uptime: Math.round(process.uptime())
@@ -134,6 +140,8 @@ const botClassDistribution = {
 const blockedWords = ["badword", "insultword", "slurword", "threatword", "adultword"];
 const players = new Map();
 const bots = new Map();
+const botSlots = [];
+const botIdToSlot = new Map();
 const projectiles = new Map();
 const lootCrates = new Map();
 const mapItems = new Map();
@@ -149,6 +157,7 @@ let lastBotPopulationCheck = 0;
 let avgTickMs = 0;
 let lastStatePayloadBytes = 0;
 let lastMinimapPayloadBytes = 0;
+let lastAiCounts = { full: 0, medium: 0, sleep: 0 };
 const worldEffects = [];
 
 function clamp(value, min, max) {
@@ -421,7 +430,11 @@ function spawnBotNear(player) {
   }
 }
 
-function spawnBotAt(point, tier) {
+function cloneBotTier(tier) {
+  return JSON.parse(JSON.stringify(tier));
+}
+
+function spawnBotAt(point, tier, slot = null) {
   const id = `bot-${nextBotId++}`;
   bots.set(id, {
     id, type: "bot", name: tier.name, ship: tier.ship, level: tier.minLevel, x: point.x, y: point.y,
@@ -429,8 +442,16 @@ function spawnBotAt(point, tier) {
     damage: tier.damage, fireRate: tier.fireRate, loot: tier.loot, xp: tier.xp, size: tier.size, lastShot: 0,
     role: tier.role, botClass: tier.botClass, preferredRange: tier.preferredRange, orbit: tier.orbit, threat: tier.threat,
     targetId: null, spawnX: point.x, spawnY: point.y, damageLog: new Map(), nextTargetAt: 0,
-    patrolAngle: Math.random() * Math.PI * 2, orbitDirection: Math.random() < 0.5 ? -1 : 1
+    patrolAngle: Math.random() * Math.PI * 2, orbitDirection: Math.random() < 0.5 ? -1 : 1,
+    slotId: slot?.id || null, aiMode: "sleep", aiSkip: 0
   });
+  if (slot) {
+    slot.currentBotId = id;
+    slot.alive = true;
+    slot.respawnAt = 0;
+    botIdToSlot.set(id, slot.id);
+  }
+  return id;
 }
 
 function maintainBots() {
@@ -446,7 +467,7 @@ function maintainBots() {
 }
 
 function desiredBotCount() {
-  return clamp(MAX_BOTS_BASE - players.size * BOTS_REMOVED_PER_PLAYER, MIN_TOTAL_BOTS, MAX_BOTS_BASE);
+  return clamp(BASE_BOT_TARGET + players.size * BOTS_PER_PLAYER_ONLINE, MIN_TOTAL_BOTS, MAX_TOTAL_BOTS);
 }
 
 function botZoneTarget(zone, target) {
@@ -472,33 +493,102 @@ function findBotSpawnPoint(zone) {
   return null;
 }
 
+function zoneForBotClass(botClass) {
+  if (botClass === "small") return Math.random() < 0.55 ? "Coast" : "Wreck Field";
+  if (botClass === "medium") return Math.random() < 0.45 ? "Wreck Field" : Math.random() < 0.7 ? "Coast" : "Storm Zone";
+  if (botClass === "large") return Math.random() < 0.5 ? "Storm Zone" : Math.random() < 0.8 ? "Wreck Field" : "Deep Water";
+  return Math.random() < 0.55 ? "Storm Zone" : "Deep Water";
+}
+
+function targetClassCounts(target) {
+  return {
+    small: Math.round(target * 0.37),
+    medium: Math.round(target * 0.33),
+    large: Math.round(target * 0.21),
+    elite: Math.max(1, target - Math.round(target * 0.37) - Math.round(target * 0.33) - Math.round(target * 0.21))
+  };
+}
+
+function createBotSlot(botClass) {
+  const zonePreference = zoneForBotClass(botClass);
+  let tier = createBotTierForZone(zonePreference);
+  let guard = 0;
+  while (tier.botClass !== botClass && guard++ < 20) tier = createBotTierForZone(zonePreference);
+  tier.botClass = botClass;
+  const slot = {
+    id: `slot-${botSlots.length + 1}`,
+    botType: tier.ship,
+    sizeClass: botClass,
+    zonePreference,
+    tier: cloneBotTier(tier),
+    currentBotId: null,
+    alive: false,
+    respawnAt: 0,
+    respawnDelay: 5000 + Math.random() * 7000
+  };
+  botSlots.push(slot);
+  return slot;
+}
+
+function maintainBotSlots(target) {
+  const desired = targetClassCounts(target);
+  const counts = { small: 0, medium: 0, large: 0, elite: 0 };
+  for (const slot of botSlots) {
+    if (counts[slot.sizeClass] !== undefined) counts[slot.sizeClass]++;
+  }
+  for (const botClass of ["small", "medium", "large", "elite"]) {
+    while (counts[botClass] < desired[botClass]) {
+      createBotSlot(botClass);
+      counts[botClass]++;
+    }
+  }
+  while (botSlots.length > target) {
+    const slot = botSlots.find((candidate) => !candidate.alive) || botSlots[botSlots.length - 1];
+    if (slot.currentBotId) {
+      bots.delete(slot.currentBotId);
+      botIdToSlot.delete(slot.currentBotId);
+    }
+    botSlots.splice(botSlots.indexOf(slot), 1);
+  }
+}
+
+function spawnSlotBot(slot) {
+  const point = findBotSpawnPoint(slot.zonePreference) || findBotSpawnPoint(zoneForBotClass(slot.sizeClass));
+  if (!point) return false;
+  spawnBotAt(point, cloneBotTier(slot.tier), slot);
+  return true;
+}
+
 function maintainBotPopulation(force = false) {
   const now = Date.now();
   if (!force && now - lastBotPopulationCheck < 3500) return;
   lastBotPopulationCheck = now;
   const target = desiredBotCount();
+  maintainBotSlots(target);
   if (bots.size > target) {
     const removable = [...bots.values()].filter((bot) => [...players.values()].every((player) => distance(bot, player) > 2200));
     let removed = 0;
     while (bots.size > target && removable.length && removed < 4) {
-      bots.delete(removable.pop().id);
+      const removedBot = removable.pop();
+      const slotId = botIdToSlot.get(removedBot.id);
+      const slot = botSlots.find((candidate) => candidate.id === slotId);
+      if (slot) {
+        slot.currentBotId = null;
+        slot.alive = false;
+        slot.respawnAt = now + slot.respawnDelay;
+      }
+      botIdToSlot.delete(removedBot.id);
+      bots.delete(removedBot.id);
       removed++;
     }
   }
-  const zones = ["Coast", "Wreck Field", "Storm Zone", "Deep Water"];
-  const counts = Object.fromEntries(zones.map((zone) => [zone, 0]));
-  for (const bot of bots.values()) {
-    const zone = zoneAt(bot.x, bot.y);
-    if (counts[zone] !== undefined) counts[zone]++;
-  }
-  let guard = 0;
-  const spawnBudget = force ? 18 : 6;
-  while (bots.size < target && guard++ < spawnBudget) {
-    const zone = zones.find((candidate) => counts[candidate] < botZoneTarget(candidate, target)) || zones[Math.floor(Math.random() * zones.length)];
-    const point = findBotSpawnPoint(zone);
-    if (!point) continue;
-    spawnBotAt(point, getBotTierForZone(zone));
-    counts[zone]++;
+  let spawned = 0;
+  const spawnBudget = force ? 150 : 10;
+  for (const slot of botSlots) {
+    if (bots.size >= target || spawned >= spawnBudget) break;
+    if (slot.currentBotId && bots.has(slot.currentBotId)) continue;
+    if (!force && slot.respawnAt && slot.respawnAt > now) continue;
+    if (spawnSlotBot(slot)) spawned++;
   }
 }
 
@@ -643,6 +733,7 @@ function addWorldEffect(type, x, y, size = 1) {
 
 function fireProjectile(owner, now) {
   if (projectiles.size >= MAX_PROJECTILES) return;
+  if (owner.type === "bot" && projectiles.size > MAX_PROJECTILES * 0.72) return;
   if (owner.type === "player" && owner.spawnProtectedUntil > now) return;
   const config = owner.type === "player" ? getShipConfig(owner.ship, owner.shipUpgrades) : null;
   const fireRate = config ? config.fireRate : owner.fireRate || 3000;
@@ -763,6 +854,14 @@ function applyDamage(target, amount, attackerId) {
   awardLoot(target, attackerId);
   addWorldEffect("explosion", target.x, target.y, Math.max(1, target.size / 55));
   if (target.type === "bot") {
+    const slotId = botIdToSlot.get(target.id);
+    const slot = botSlots.find((candidate) => candidate.id === slotId);
+    if (slot) {
+      slot.currentBotId = null;
+      slot.alive = false;
+      slot.respawnAt = Date.now() + slot.respawnDelay;
+    }
+    botIdToSlot.delete(target.id);
     bots.delete(target.id);
     setTimeout(() => maintainBotPopulation(true), 5000 + Math.random() * 7000);
   } else {
@@ -867,9 +966,23 @@ function updatePlayers(dt, now) {
   }
 }
 
+function botAiMode(bot) {
+  let bestSq = Infinity;
+  for (const player of players.values()) bestSq = Math.min(bestSq, distanceSq(bot, player));
+  if (bestSq <= BOT_ACTIVE_DISTANCE_SQ) return "full";
+  if (bestSq <= MEDIUM_AI_DISTANCE_SQ) return "medium";
+  return "sleep";
+}
+
 function updateBots(dt, now) {
+  const aiCounts = { full: 0, medium: 0, sleep: 0 };
   for (const bot of bots.values()) {
-    const farFromPlayers = ![...players.values()].some((player) => distanceSq(bot, player) <= BOT_ACTIVE_DISTANCE_SQ);
+    const mode = botAiMode(bot);
+    bot.aiMode = mode;
+    aiCounts[mode]++;
+    bot.aiSkip = (bot.aiSkip || 0) + 1;
+    if (mode === "medium" && bot.aiSkip % 2 !== 0) continue;
+    if (mode === "sleep" && bot.aiSkip % 18 !== 0) continue;
     const config = {
       speed: bot.speed,
       acceleration: bot.speed * (bot.botClass === "small" ? 2.1 : bot.botClass === "elite" ? 1.35 : 1.65),
@@ -877,7 +990,7 @@ function updateBots(dt, now) {
       friction: 0.968,
       turn: bot.botClass === "small" ? 3.8 : bot.botClass === "large" ? 1.85 : bot.botClass === "elite" ? 1.65 : 2.75
     };
-    const target = chooseBotTarget(bot, now);
+    const target = mode === "sleep" ? null : chooseBotTarget(bot, now);
     if (target && distanceSq(bot, { x: bot.spawnX, y: bot.spawnY }) < 1700 * 1700) {
       const targetAngle = angleTo(bot, target);
       const d = distance(bot, target);
@@ -901,20 +1014,21 @@ function updateBots(dt, now) {
       const throttle = d > targetRange + 130 ? 1 : d < targetRange - 110 ? -0.38 : 0.45;
       updateBoatPhysics(bot, { throttle, turn }, config, dt);
       const aimAngle = targetAngle + (Math.random() - 0.5) * (bot.botClass === "elite" ? 0.08 : 0.16);
-      if (d < 760 && Math.abs(wrapAngle(targetAngle - bot.angle)) < 0.72) {
+      if (mode === "full" && d < 760 && Math.abs(wrapAngle(targetAngle - bot.angle)) < 0.72) {
         bot.aimAngle = aimAngle;
         fireProjectile(bot, now);
       }
     } else {
       bot.targetId = null;
-      bot.patrolAngle += Math.sin(now / 1200 + bot.x) * (farFromPlayers ? 0.012 : 0.025) + (Math.random() - 0.5) * 0.01;
+      bot.patrolAngle += Math.sin(now / 1200 + bot.x) * (mode === "sleep" ? 0.012 : 0.025) + (Math.random() - 0.5) * 0.01;
       const patrolTurn = clamp(wrapAngle(bot.patrolAngle - bot.angle), -0.55, 0.55);
-      updateBoatPhysics(bot, { throttle: farFromPlayers ? 0.22 : 0.45, turn: patrolTurn }, config, dt);
+      updateBoatPhysics(bot, { throttle: mode === "sleep" ? 0.18 : mode === "medium" ? 0.3 : 0.45, turn: patrolTurn }, config, dt);
       if (isSafe(bot)) {
         bot.patrolAngle = angleTo(SAFE_ZONE, bot);
       }
     }
   }
+  lastAiCounts = aiCounts;
 }
 
 function updateProjectiles(dt, now) {
@@ -1033,6 +1147,9 @@ function compactStats() {
   return {
     players: players.size,
     bots: bots.size,
+    fullAiBots: lastAiCounts.full,
+    mediumAiBots: lastAiCounts.medium,
+    sleepBots: lastAiCounts.sleep,
     botTarget: desiredBotCount(),
     projectiles: projectiles.size,
     loot: lootCrates.size,
@@ -1354,6 +1471,9 @@ setInterval(() => {
   console.log(JSON.stringify({
     players: players.size,
     bots: bots.size,
+    fullAiBots: lastAiCounts.full,
+    mediumAiBots: lastAiCounts.medium,
+    sleepBots: lastAiCounts.sleep,
     projectiles: projectiles.size,
     loot: lootCrates.size,
     items: mapItems.size,

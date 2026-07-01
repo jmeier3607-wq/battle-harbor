@@ -17,6 +17,14 @@
           Nickname
           <input id="nicknameInput" maxlength="16" autocomplete="off" placeholder="Captain" />
         </label>
+        <label>
+          Control Mode
+          <select id="controlModeSelect">
+            <option value="keyboard">Keyboard + Mouse</option>
+            <option value="touch">Touch</option>
+            <option value="hybrid">Hybrid</option>
+          </select>
+        </label>
         <div id="selectedShipPreview" class="ship-preview"></div>
         <div id="shipSelect" class="ship-select"></div>
         <div id="upgradePanel" class="upgrade-panel"></div>
@@ -52,14 +60,33 @@
       <div class="panel action-panel">
         <button id="exitButton">Exit</button>
         <button id="backLobbyButton">Back to Lobby</button>
+        <button id="settingsButton">Settings</button>
         <button id="allyButton">Ally nearest</button>
         <button id="leaveAllyButton">Leave alliance</button>
+        <div id="hudSettings" class="hud-settings hidden">
+          <label><input id="touchToggle" type="checkbox" /> Touch Controls</label>
+          <label><input id="chatToggle" type="checkbox" checked /> Chat</label>
+          <label>Minimap
+            <select id="minimapSizeSelect">
+              <option value="normal">Normal</option>
+              <option value="small">Small</option>
+            </select>
+          </label>
+          <label>HUD Scale
+            <select id="hudScaleSelect">
+              <option value="normal">Normal</option>
+              <option value="small">Small</option>
+              <option value="large">Large</option>
+            </select>
+          </label>
+        </div>
         <div id="exitStatus"></div>
         <div id="effectStatus"></div>
       </div>
 
       <div class="panel weapon-panel">
         <div id="weaponText">Weapon ready</div>
+        <div id="boostText">BOOST 100/100</div>
         <div class="reload"><span id="reloadBar"></span></div>
       </div>
 
