@@ -70,6 +70,7 @@ let socketStatus = "Connecting";
 let serverStats = {};
 let netUpdates = 0;
 let netRate = 0;
+let lastPayloadKb = 0;
 let frameCount = 0;
 let fps = 0;
 let lastPerfSample = performance.now();
@@ -362,6 +363,21 @@ function drawShip(entity, kind) {
   const ally = mineEntity && entity.allianceId && entity.allianceId === mineEntity.allianceId && !mine;
   const accent = shipDefinitions[entity.ship]?.accent || "#46a8ff";
   const statusColor = kind === "bot" ? "#c34d55" : ally ? "#56d686" : mine ? "#46a8ff" : "#ff9c57";
+  const bigBot = kind === "bot" && (entity.botClass === "large" || entity.botClass === "elite" || entity.size >= 92);
+  const eliteBot = kind === "bot" && (entity.botClass === "elite" || entity.threat >= 5);
+  if (bigBot) {
+    ctx.fillStyle = eliteBot ? "rgba(255, 88, 44, 0.18)" : "rgba(255, 180, 72, 0.12)";
+    ctx.beginPath();
+    ctx.ellipse(p.x + 5, p.y + 10, entity.size * 1.75, entity.size * 1.05, entity.angle, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  if (eliteBot) {
+    ctx.strokeStyle = "rgba(255, 74, 42, 0.88)";
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, entity.size * 1.68, 0, Math.PI * 2);
+    ctx.stroke();
+  }
   if (entity.spawnProtected) {
     ctx.strokeStyle = `rgba(130, 215, 255, ${0.45 + Math.sin(performance.now() / 120) * 0.2})`;
     ctx.lineWidth = 4;
@@ -377,8 +393,8 @@ function drawShip(entity, kind) {
   }
   if ((entity.speed || 0) > 8) {
     ctx.strokeStyle = entity.boosting ? "rgba(68,215,242,0.55)" : "rgba(210,240,255,0.24)";
-    ctx.lineWidth = entity.boosting ? 4 : 2;
-    const wake = entity.boosting ? entity.size * 1.9 : entity.size * 1.35;
+    ctx.lineWidth = entity.boosting ? 4 : bigBot ? 3 : 2;
+    const wake = entity.boosting ? entity.size * 1.9 : bigBot ? entity.size * 1.65 : entity.size * 1.35;
     ctx.beginPath();
     ctx.moveTo(p.x - Math.cos(entity.angle) * entity.size * 0.7, p.y - Math.sin(entity.angle) * entity.size * 0.7);
     ctx.lineTo(p.x - Math.cos(entity.angle) * wake + Math.sin(entity.angle) * 12, p.y - Math.sin(entity.angle) * wake - Math.cos(entity.angle) * 12);
@@ -404,11 +420,13 @@ function drawShip(entity, kind) {
   ctx.font = "12px Segoe UI";
   ctx.textAlign = "center";
   ctx.fillStyle = ally ? "#56d686" : kind === "bot" ? "#d0d3d7" : mine ? "#9ed1ff" : "#ffbd8a";
-  ctx.fillText(`${tag} ${entity.name} L${entity.level}`, p.x, p.y - entity.size * 1.45 - 26);
+  const labelY = p.y - entity.size * 1.55 - 30;
+  ctx.fillText(`${tag} ${entity.name} L${entity.level}`, p.x, labelY);
+  const barWidth = bigBot ? 112 : 84;
   ctx.fillStyle = "rgba(0,0,0,0.55)";
-  ctx.fillRect(p.x - 42, p.y - entity.size * 1.45 - 18, 84, 8);
+  ctx.fillRect(p.x - barWidth / 2, labelY + 8, barWidth, bigBot ? 10 : 8);
   ctx.fillStyle = entity.hp / entity.maxHp > 0.35 ? "#56d686" : "#ff716d";
-  ctx.fillRect(p.x - 42, p.y - entity.size * 1.45 - 18, 84 * Math.max(0, entity.hp / entity.maxHp), 8);
+  ctx.fillRect(p.x - barWidth / 2, labelY + 8, barWidth * Math.max(0, entity.hp / entity.maxHp), bigBot ? 10 : 8);
   if (entity.exiting) {
     ctx.fillStyle = "#ffd45a";
     ctx.fillText("EXITING", p.x, p.y + entity.size * 1.25 + 28);
@@ -427,14 +445,16 @@ function drawShipBody(ship, size, accent, statusColor, isBot) {
   const armor = Math.max(0, Math.min(5, Math.floor(def.hp / 125)));
   const cannons = shape === "trident" ? 3 : shape === "catamaran" || shape === "tank" || shape === "fortress" || shape === "royal" ? 2 : 1;
   const slender = shape === "needle" || shape === "cutter";
+  const heavyVisual = size >= 92;
+  const eliteVisual = isBot && size >= 118;
   ctx.fillStyle = "rgba(0,0,0,0.22)";
   ctx.beginPath();
-  ctx.ellipse(-2, 5, size * 1.22, size * (slender ? 0.56 : 0.78), 0, 0, Math.PI * 2);
+  ctx.ellipse(-2, 5, size * (heavyVisual ? 1.45 : 1.22), size * (slender ? 0.56 : heavyVisual ? 0.96 : 0.78), 0, 0, Math.PI * 2);
   ctx.fill();
 
   ctx.fillStyle = "#2c3941";
   ctx.strokeStyle = statusColor;
-  ctx.lineWidth = 3;
+  ctx.lineWidth = heavyVisual ? 5 : 3;
 
   if (shape === "needle" || ship === "Scout") {
     ctx.beginPath();
@@ -516,6 +536,20 @@ function drawShipBody(ship, size, accent, statusColor, isBot) {
     drawCannon(size * 0.22, 0, size * 0.82, 6);
   }
   if (armor > 1 && shape !== "needle") drawArmorPlates(size * (0.7 + armor * 0.06));
+  if (heavyVisual) {
+    drawArmorPlates(size * 1.18);
+    drawCannon(size * -0.1, -size * 0.5, size * 0.75, 7);
+    drawCannon(size * -0.1, size * 0.5, size * 0.75, 7);
+  }
+  if (eliteVisual) {
+    drawCannon(size * -0.35, -size * 0.75, size * 0.7, 8);
+    drawCannon(size * -0.35, size * 0.75, size * 0.7, 8);
+    ctx.strokeStyle = "#ff6b35";
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.arc(0, 0, size * 1.05, 0, Math.PI * 2);
+    ctx.stroke();
+  }
   if (cannons > 2) {
     ctx.fillStyle = accent;
     ctx.fillRect(-size * 0.1, -size * 0.08, size * 0.22, size * 0.16);
@@ -689,18 +723,21 @@ function drawMinimap() {
   for (const point of mini?.points || []) {
     if (point.type === "harbor") continue;
     if (point.type === "bot" || point.type === "eliteBot") {
-      mctx.fillStyle = point.type === "eliteBot" ? "#ff8b3d" : "#ff4f4f";
+      const radius = point.sizeClass === "elite" ? 4.4 : point.sizeClass === "large" ? 3.5 : point.sizeClass === "medium" ? 2.4 : 1.5;
+      mctx.fillStyle = point.sizeClass === "elite" ? "#ff3f2f" : point.sizeClass === "large" ? "#ff9b38" : point.sizeClass === "medium" ? "#ff7f38" : "#ff4f4f";
       mctx.beginPath();
-      mctx.arc(point.x * scale, point.y * scale, point.type === "eliteBot" ? 2.4 : 1.6, 0, Math.PI * 2);
+      mctx.arc(point.x * scale, point.y * scale, radius, 0, Math.PI * 2);
       mctx.fill();
+      if (point.sizeClass === "elite") {
+        mctx.strokeStyle = "#ffd45a";
+        mctx.lineWidth = 1;
+        mctx.stroke();
+      }
     } else {
       mctx.fillStyle = point.type === "self" ? "#f5fbff" : point.type === "ally" ? "#56d686" : "#46a8ff";
       mctx.beginPath();
       if (point.type === "self") {
-        mctx.moveTo(point.x * scale + Math.cos(point.angle) * 5, point.y * scale + Math.sin(point.angle) * 5);
-        mctx.lineTo(point.x * scale + Math.cos(point.angle + 2.45) * 4, point.y * scale + Math.sin(point.angle + 2.45) * 4);
-        mctx.lineTo(point.x * scale + Math.cos(point.angle - 2.45) * 4, point.y * scale + Math.sin(point.angle - 2.45) * 4);
-        mctx.closePath();
+        mctx.arc(point.x * scale, point.y * scale, 3.5, 0, Math.PI * 2);
       } else {
         mctx.arc(point.x * scale, point.y * scale, point.type === "ally" ? 3 : 2.5, 0, Math.PI * 2);
       }
@@ -798,8 +835,14 @@ function updateHud() {
       `Visible objects: ${visibleObjects}`,
       `Players: ${serverStats.players ?? state.players.length}`,
       `Bots: ${serverStats.bots ?? state.botCount} / ${serverStats.botTarget ?? state.botTarget}`,
+      `Visible bots: ${state.bots?.length || 0}`,
       `Projectiles: ${serverStats.projectiles ?? state.projectiles.length}`,
+      `Visible projectiles: ${state.projectiles?.length || 0}`,
       `Net updates/s: ${netRate}`,
+      `Last payload: ${lastPayloadKb.toFixed(2)} KB`,
+      `Server tick: ${serverStats.avgTickMs ?? "--"} ms`,
+      `State payload: ${serverStats.statePayloadKb ?? "--"} KB`,
+      `Minimap payload: ${serverStats.minimapPayloadKb ?? "--"} KB`,
       `State Hz: ${serverStats.stateHz ?? "--"}`,
       `Minimap Hz: ${serverStats.minimapHz ?? "--"}`,
       `Socket: ${socketStatus}`
@@ -1042,6 +1085,7 @@ socket.on("joined", ({ id, worldSize, safeZone, obstacles, mapObjects }) => {
 
 socket.on("state", (nextState) => {
   netUpdates++;
+  lastPayloadKb = new Blob([JSON.stringify(nextState)]).size / 1024;
   state = { ...staticWorld, ...nextState };
   const mine = me();
   if (mine) {

@@ -12,10 +12,13 @@ const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || "0.0.0.0";
 const WORLD_SIZE = 20000;
 const TICK_RATE = 30;
-const STATE_SEND_RATE = 12;
+const STATE_SEND_RATE = 10;
 const MINIMAP_SEND_RATE = 1;
-const VIEW_DISTANCE = 2800;
+const VIEW_DISTANCE = 3000;
 const VIEW_DISTANCE_SQ = VIEW_DISTANCE * VIEW_DISTANCE;
+const BOT_ACTIVE_DISTANCE = 3600;
+const BOT_ACTIVE_DISTANCE_SQ = BOT_ACTIVE_DISTANCE * BOT_ACTIVE_DISTANCE;
+const MAX_PROJECTILES = 260;
 const SAFE_ZONE = { x: 10000, y: 10000, radius: 620 };
 const SPEED_MULTIPLIER = 1.18;
 const ACCELERATION_MULTIPLIER = 1.14;
@@ -44,6 +47,8 @@ app.get("/health", (req, res) => {
     status: "ok",
     players: players.size,
     bots: bots.size,
+    projectiles: projectiles.size,
+    avgTickMs: round2(avgTickMs),
     uptime: Math.round(process.uptime())
   });
 });
@@ -113,6 +118,18 @@ const botShipWeights = shipNames.map((ship, index) => ({
   index,
   weight: index < 5 ? 10 : index < 10 ? 6 : index < 15 ? 3 : index < 20 ? 1.5 : 0.5
 }));
+const botClassRanges = {
+  small: [0, 9],
+  medium: [10, 16],
+  large: [17, 22],
+  elite: [21, 24]
+};
+const botClassDistribution = {
+  Coast: { small: 0.6, medium: 0.3, large: 0.1, elite: 0 },
+  "Wreck Field": { small: 0.25, medium: 0.45, large: 0.25, elite: 0.05 },
+  "Storm Zone": { small: 0.1, medium: 0.35, large: 0.4, elite: 0.15 },
+  "Deep Water": { small: 0.05, medium: 0.25, large: 0.45, elite: 0.25 }
+};
 
 const blockedWords = ["badword", "insultword", "slurword", "threatword", "adultword"];
 const players = new Map();
@@ -129,6 +146,9 @@ let nextItemId = 1;
 let nextAllianceId = 1;
 let nextInviteId = 1;
 let lastBotPopulationCheck = 0;
+let avgTickMs = 0;
+let lastStatePayloadBytes = 0;
+let lastMinimapPayloadBytes = 0;
 const worldEffects = [];
 
 function clamp(value, min, max) {
@@ -192,16 +212,27 @@ function getBotTierForZone(zone) {
   return createBotTierForZone(zone);
 }
 
+function rollBotClass(zone) {
+  const distribution = botClassDistribution[zone] || botClassDistribution["Deep Water"];
+  let roll = Math.random();
+  for (const [botClass, weight] of Object.entries(distribution)) {
+    roll -= weight;
+    if (roll <= 0) return botClass;
+  }
+  return "medium";
+}
+
 function weightedBotShip(zone) {
-  const maxIndex = zone === "Coast" ? 10 : zone === "Wreck Field" ? 20 : shipNames.length;
-  const candidates = botShipWeights.filter((entry) => entry.index < maxIndex);
+  const botClass = rollBotClass(zone);
+  const [minIndex, maxIndex] = botClassRanges[botClass];
+  const candidates = botShipWeights.filter((entry) => entry.index >= minIndex && entry.index <= maxIndex);
   const total = candidates.reduce((sum, entry) => sum + entry.weight, 0);
   let roll = Math.random() * total;
   for (const entry of candidates) {
     roll -= entry.weight;
-    if (roll <= 0) return entry;
+    if (roll <= 0) return { ...entry, botClass };
   }
-  return candidates[0];
+  return { ...candidates[0], botClass };
 }
 
 function createBotTierForZone(zone) {
@@ -210,20 +241,26 @@ function createBotTierForZone(zone) {
   const config = getShipConfig(ship);
   const rank = picked.index + 1;
   const zoneFactor = zone === "Coast" ? 0.62 : zone === "Wreck Field" ? 0.78 : zone === "Storm Zone" ? 0.95 : 0.85;
-  const threat = clamp(Math.ceil(rank / 5), 1, 5);
-  const role = threat <= 1 ? "ScoutBot" : threat === 2 ? "RaiderBot" : threat === 3 ? "GunnerBot" : threat === 4 ? "TankBot" : "EliteBot";
+  const classThreat = { small: 1, medium: 2, large: 4, elite: 5 };
+  const threat = classThreat[picked.botClass] || clamp(Math.ceil(rank / 5), 1, 5);
+  const role = picked.botClass === "small" ? "Small Bot" : picked.botClass === "medium" ? "Medium Bot" : picked.botClass === "large" ? "Large Bot" : "Elite Bot";
+  const lootRanges = { small: [50, 100], medium: [150, 250], large: [400, 700], elite: [1000, 1500] };
+  const [lootMin, lootMax] = lootRanges[picked.botClass] || lootRanges.medium;
+  const sizeFactor = picked.botClass === "small" ? 0.9 : picked.botClass === "medium" ? 1 : picked.botClass === "large" ? 1.22 : 1.35;
+  const speedFactor = picked.botClass === "small" ? 0.82 : picked.botClass === "medium" ? 0.72 : picked.botClass === "large" ? 0.58 : 0.52;
   return {
     minLevel: Math.max(1, rank),
     maxLevel: 999,
     role,
+    botClass: picked.botClass,
     name: `${role} ${ship}`,
-    hp: Math.round(config.hp * zoneFactor * (0.85 + threat * 0.06)),
-    speed: config.speed * (0.68 + threat * 0.025),
-    damage: Math.round(config.damage * zoneFactor * (0.65 + threat * 0.06)),
+    hp: Math.round(config.hp * zoneFactor * (0.9 + threat * 0.09)),
+    speed: config.speed * speedFactor,
+    damage: Math.round(config.damage * zoneFactor * (0.72 + threat * 0.08)),
     fireRate: Math.round(config.fireRate * (1.08 - threat * 0.025)),
-    loot: Math.round((45 + rank * 28) * (zoneFactor + threat * 0.08)),
+    loot: Math.round(lootMin + Math.random() * (lootMax - lootMin)),
     xp: Math.round((35 + rank * 14) * (zoneFactor + threat * 0.05)),
-    size: config.size,
+    size: Math.round(config.size * sizeFactor),
     ship,
     preferredRange: config.range ? clamp(config.range * 0.55, 320, 720) : 420,
     orbit: threat <= 2 ? 0.55 : threat === 3 ? 0.25 : 0.12,
@@ -376,6 +413,7 @@ function spawnBotNear(player) {
       id, type: "bot", name: tier.name, ship: tier.ship, level: Math.max(1, player.level), x, y,
       angle: Math.random() * Math.PI * 2, vx: 0, vy: 0, hp: tier.hp, maxHp: tier.hp, speed: tier.speed,
       damage: tier.damage, loot: tier.loot, xp: tier.xp, size: tier.size, lastShot: 0,
+      role: tier.role, botClass: tier.botClass, fireRate: tier.fireRate, preferredRange: tier.preferredRange, orbit: tier.orbit, threat: tier.threat,
       targetId: null, spawnX: x, spawnY: y, damageLog: new Map(), nextTargetAt: 0,
       patrolAngle: Math.random() * Math.PI * 2
     });
@@ -389,7 +427,7 @@ function spawnBotAt(point, tier) {
     id, type: "bot", name: tier.name, ship: tier.ship, level: tier.minLevel, x: point.x, y: point.y,
     angle: Math.random() * Math.PI * 2, vx: 0, vy: 0, hp: tier.hp, maxHp: tier.hp, speed: tier.speed,
     damage: tier.damage, fireRate: tier.fireRate, loot: tier.loot, xp: tier.xp, size: tier.size, lastShot: 0,
-    role: tier.role, preferredRange: tier.preferredRange, orbit: tier.orbit, threat: tier.threat,
+    role: tier.role, botClass: tier.botClass, preferredRange: tier.preferredRange, orbit: tier.orbit, threat: tier.threat,
     targetId: null, spawnX: point.x, spawnY: point.y, damageLog: new Map(), nextTargetAt: 0,
     patrolAngle: Math.random() * Math.PI * 2, orbitDirection: Math.random() < 0.5 ? -1 : 1
   });
@@ -604,6 +642,7 @@ function addWorldEffect(type, x, y, size = 1) {
 }
 
 function fireProjectile(owner, now) {
+  if (projectiles.size >= MAX_PROJECTILES) return;
   if (owner.type === "player" && owner.spawnProtectedUntil > now) return;
   const config = owner.type === "player" ? getShipConfig(owner.ship, owner.shipUpgrades) : null;
   const fireRate = config ? config.fireRate : owner.fireRate || 3000;
@@ -629,27 +668,34 @@ function getEntityById(id) {
 }
 
 function chooseBotTarget(bot, now) {
+  const nearPlayer = [...players.values()].some((player) => distanceSq(bot, player) <= BOT_ACTIVE_DISTANCE_SQ);
+  if (!nearPlayer) {
+    bot.nextTargetAt = Math.max(bot.nextTargetAt || 0, now + 3000 + Math.random() * 3500);
+    bot.targetId = null;
+    return null;
+  }
   if (now < bot.nextTargetAt) {
     const current = getEntityById(bot.targetId);
-    if (current && current.hp > 0 && distance(bot, current) < 1250 && canDamage(bot, current)) return current;
+    if (current && current.hp > 0 && distanceSq(bot, current) < 1250 * 1250 && canDamage(bot, current)) return current;
   }
-  bot.nextTargetAt = now + 1400 + Math.random() * 2600;
+  bot.nextTargetAt = now + 2000 + Math.random() * 2500;
   const targetLoad = new Map();
   for (const other of bots.values()) {
     if (other.id !== bot.id && other.targetId) targetLoad.set(other.targetId, (targetLoad.get(other.targetId) || 0) + 1);
   }
   const candidates = [];
   for (const player of players.values()) {
-    const d = distance(bot, player);
-    if (d < 1150 && canDamage(bot, player)) {
+    const dSq = distanceSq(bot, player);
+    if (dSq < 1150 * 1150 && canDamage(bot, player)) {
+      const d = Math.sqrt(dSq);
       const loadPenalty = 1 + (targetLoad.get(player.id) || 0) * 0.55;
       candidates.push({ entity: player, score: d * loadPenalty * (0.7 + Math.random() * 0.65) });
     }
   }
   for (const other of bots.values()) {
     if (other.id === bot.id) continue;
-    const d = distance(bot, other);
-    if (d < 820 && canDamage(bot, other)) candidates.push({ entity: other, score: d * (1.15 + Math.random() * 1.4) });
+    const dSq = distanceSq(bot, other);
+    if (dSq < 820 * 820 && canDamage(bot, other)) candidates.push({ entity: other, score: Math.sqrt(dSq) * (1.15 + Math.random() * 1.4) });
   }
   candidates.sort((a, b) => a.score - b.score);
   const picked = candidates[Math.floor(Math.random() * Math.min(3, candidates.length))];
@@ -664,20 +710,20 @@ function awardLoot(target, killerId) {
     lootCrates.set(crateId, { id: crateId, x: target.x, y: target.y, value: total, expiresAt: Date.now() + 60000 });
   }
   if (total <= 0) return;
-  const damageEntries = [...target.damageLog.entries()].filter(([id]) => players.has(id));
-  const damageTotal = damageEntries.reduce((sum, [, value]) => sum + value, 0) || 1;
-  for (const [id, damage] of damageEntries) {
-    const player = players.get(id);
-    if (!player) continue;
-    const assist = Math.floor(total * 0.4 * (damage / damageTotal));
-    const kill = id === killerId ? Math.floor(total * 0.6) : 0;
-    player.temporaryLoot += assist + kill;
-    player.xp += Math.floor((target.xp || 60) * (id === killerId ? 1 : 0.35));
-    while (player.xp >= xpNeeded(player.level)) {
-      player.xp -= xpNeeded(player.level);
-      player.level += 1;
-      io.to(player.id).emit("system", `Level up! You reached level ${player.level}.`);
-    }
+  const player = players.get(killerId);
+  if (!player) return;
+  player.temporaryLoot += total;
+  player.xp += target.xp || 60;
+  const message = target.type === "bot" && target.botClass === "elite"
+    ? `ELITE KILL +${total}`
+    : target.type === "bot" && target.botClass === "large"
+      ? `Destroyed ${target.name} +${total}`
+      : `KILL +${total}`;
+  io.to(player.id).emit("system", message);
+  while (player.xp >= xpNeeded(player.level)) {
+    player.xp -= xpNeeded(player.level);
+    player.level += 1;
+    io.to(player.id).emit("system", `Level up! You reached level ${player.level}.`);
   }
 }
 
@@ -823,15 +869,16 @@ function updatePlayers(dt, now) {
 
 function updateBots(dt, now) {
   for (const bot of bots.values()) {
+    const farFromPlayers = ![...players.values()].some((player) => distanceSq(bot, player) <= BOT_ACTIVE_DISTANCE_SQ);
     const config = {
       speed: bot.speed,
-      acceleration: bot.speed * (bot.role === "ScoutBot" ? 2.1 : 1.75),
+      acceleration: bot.speed * (bot.botClass === "small" ? 2.1 : bot.botClass === "elite" ? 1.35 : 1.65),
       reverseSpeed: bot.speed * 0.35,
       friction: 0.968,
-      turn: bot.role === "ScoutBot" ? 3.8 : bot.role === "TankBot" ? 1.85 : bot.role === "EliteBot" ? 3.05 : 2.75
+      turn: bot.botClass === "small" ? 3.8 : bot.botClass === "large" ? 1.85 : bot.botClass === "elite" ? 1.65 : 2.75
     };
     const target = chooseBotTarget(bot, now);
-    if (target && distance(bot, { x: bot.spawnX, y: bot.spawnY }) < 1700) {
+    if (target && distanceSq(bot, { x: bot.spawnX, y: bot.spawnY }) < 1700 * 1700) {
       const targetAngle = angleTo(bot, target);
       const d = distance(bot, target);
       let desiredAngle = targetAngle;
@@ -853,16 +900,16 @@ function updateBots(dt, now) {
       const targetRange = bot.preferredRange || 360;
       const throttle = d > targetRange + 130 ? 1 : d < targetRange - 110 ? -0.38 : 0.45;
       updateBoatPhysics(bot, { throttle, turn }, config, dt);
-      const aimAngle = targetAngle + (Math.random() - 0.5) * (bot.role === "EliteBot" ? 0.08 : 0.16);
+      const aimAngle = targetAngle + (Math.random() - 0.5) * (bot.botClass === "elite" ? 0.08 : 0.16);
       if (d < 760 && Math.abs(wrapAngle(targetAngle - bot.angle)) < 0.72) {
         bot.aimAngle = aimAngle;
         fireProjectile(bot, now);
       }
     } else {
       bot.targetId = null;
-      bot.patrolAngle += Math.sin(now / 900 + bot.x) * 0.025 + (Math.random() - 0.5) * 0.015;
+      bot.patrolAngle += Math.sin(now / 1200 + bot.x) * (farFromPlayers ? 0.012 : 0.025) + (Math.random() - 0.5) * 0.01;
       const patrolTurn = clamp(wrapAngle(bot.patrolAngle - bot.angle), -0.55, 0.55);
-      updateBoatPhysics(bot, { throttle: 0.45, turn: patrolTurn }, config, dt);
+      updateBoatPhysics(bot, { throttle: farFromPlayers ? 0.22 : 0.45, turn: patrolTurn }, config, dt);
       if (isSafe(bot)) {
         bot.patrolAngle = angleTo(SAFE_ZONE, bot);
       }
@@ -939,7 +986,7 @@ function serializePlayer(p, now) {
 
 function serializeBot(b, now) {
   return {
-    id: b.id, name: b.name, ship: b.ship, level: b.level, role: b.role, threat: b.threat,
+    id: b.id, name: b.name, ship: b.ship, level: b.level, role: b.role, botClass: b.botClass, threat: b.threat,
     x: round1(b.x), y: round1(b.y), angle: round2(b.angle), hp: Math.ceil(b.hp), maxHp: Math.ceil(b.maxHp),
     size: b.size, speed: Math.round(speedOf(b)), targetId: b.targetId,
     hitFlash: b.lastHitAt && now - b.lastHitAt < 180
@@ -949,8 +996,6 @@ function serializeBot(b, now) {
 function compactState(viewer) {
   const now = Date.now();
   return {
-    worldSize: WORLD_SIZE,
-    safeZone: SAFE_ZONE,
     zoneCounts: zoneCountsSnapshot(),
     players: [...players.values()].filter((p) => nearViewer(p, viewer)).map((p) => serializePlayer(p, now)),
     bots: [...bots.values()]
@@ -969,12 +1014,19 @@ function compactMinimap(viewer) {
   const points = [{ id: "harbor", type: "harbor", x: SAFE_ZONE.x, y: SAFE_ZONE.y }];
   for (const player of players.values()) {
     const ally = viewer && player.id !== viewer.id && player.allianceId && player.allianceId === viewer.allianceId;
-    points.push({ id: player.id, type: player.id === viewer?.id ? "self" : ally ? "ally" : "player", x: Math.round(player.x), y: Math.round(player.y), angle: round2(player.angle) });
+    points.push({ id: player.id, type: player.id === viewer?.id ? "self" : ally ? "ally" : "player", x: Math.round(player.x), y: Math.round(player.y), sizeClass: sizeClassFor(player.size) });
   }
   for (const bot of bots.values()) {
-    points.push({ id: bot.id, type: (bot.threat || 1) >= 4 ? "eliteBot" : "bot", x: Math.round(bot.x), y: Math.round(bot.y) });
+    points.push({ id: bot.id, type: bot.botClass === "elite" ? "eliteBot" : "bot", x: Math.round(bot.x), y: Math.round(bot.y), sizeClass: bot.botClass || sizeClassFor(bot.size) });
   }
   return { worldSize: WORLD_SIZE, points };
+}
+
+function sizeClassFor(size) {
+  if (size >= 118) return "elite";
+  if (size >= 92) return "large";
+  if (size >= 66) return "medium";
+  return "small";
 }
 
 function compactStats() {
@@ -985,9 +1037,16 @@ function compactStats() {
     projectiles: projectiles.size,
     loot: lootCrates.size,
     items: mapItems.size,
+    avgTickMs: round2(avgTickMs),
+    statePayloadKb: round2(lastStatePayloadBytes / 1024),
+    minimapPayloadKb: round2(lastMinimapPayloadBytes / 1024),
     stateHz: STATE_SEND_RATE,
     minimapHz: MINIMAP_SEND_RATE
   };
+}
+
+function payloadBytes(payload) {
+  return Buffer.byteLength(JSON.stringify(payload));
 }
 
 function allianceMemberCount(allianceId) {
@@ -1250,6 +1309,7 @@ io.on("connection", (socket) => {
 });
 
 setInterval(() => {
+  const start = process.hrtime.bigint();
   const now = Date.now();
   const dt = 1 / TICK_RATE;
   maintainBotPopulation();
@@ -1259,12 +1319,18 @@ setInterval(() => {
   updateProjectiles(dt, now);
   applyBoatCollisions(now);
   cleanup();
+  const elapsedMs = Number(process.hrtime.bigint() - start) / 1e6;
+  avgTickMs = avgTickMs ? avgTickMs * 0.95 + elapsedMs * 0.05 : elapsedMs;
 }, 1000 / TICK_RATE);
 
 setInterval(() => {
   for (const socket of io.sockets.sockets.values()) {
     const player = players.get(socket.id);
-    if (player) socket.emit("state", compactState(player));
+    if (player) {
+      const payload = compactState(player);
+      lastStatePayloadBytes = Math.max(lastStatePayloadBytes * 0.85, payloadBytes(payload));
+      socket.emit("state", payload);
+    }
   }
 }, 1000 / STATE_SEND_RATE);
 
@@ -1272,7 +1338,9 @@ setInterval(() => {
   for (const socket of io.sockets.sockets.values()) {
     const player = players.get(socket.id);
     if (player) {
-      socket.emit("minimap", compactMinimap(player));
+      const payload = compactMinimap(player);
+      lastMinimapPayloadBytes = Math.max(lastMinimapPayloadBytes * 0.85, payloadBytes(payload));
+      socket.emit("minimap", payload);
       sendAllianceList(socket, player);
     }
   }
@@ -1281,6 +1349,19 @@ setInterval(() => {
 setInterval(() => {
   io.emit("serverStats", compactStats());
 }, 1000);
+
+setInterval(() => {
+  console.log(JSON.stringify({
+    players: players.size,
+    bots: bots.size,
+    projectiles: projectiles.size,
+    loot: lootCrates.size,
+    items: mapItems.size,
+    avgTickMs: round2(avgTickMs),
+    statePayloadKb: round2(lastStatePayloadBytes / 1024),
+    minimapPayloadKb: round2(lastMinimapPayloadBytes / 1024)
+  }));
+}, 5000);
 
 function lanUrls(port) {
   return Object.values(os.networkInterfaces())

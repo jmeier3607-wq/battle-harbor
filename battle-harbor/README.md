@@ -100,7 +100,7 @@ npm start
 
 Runtime checks:
 
-- `GET /health` returns JSON with server status, player count, bot count, and uptime.
+- `GET /health` returns JSON with server status, player count, bot count, projectile count, uptime, and average server tick time.
 - `localhost` only works on the computer running the server.
 - The browser client uses `io()` without a localhost URL, so Socket.io connects to the same public Railway domain.
 - Railway Hobby is recommended for longer 24/7 sessions instead of temporary tunnel or free/test hosting.
@@ -135,9 +135,14 @@ Performance model:
 - Entering Harbor immediately secures temporary loot.
 - Outside Harbor, pressing E starts a 90-second exit. Survive the countdown to secure loot and return to Harbor.
 - Bots are managed by a population manager: `targetBots = clamp(150 - playerCount * 15, 45, 150)`. Set `SERVER_PERFORMANCE_MODE=1` for a lower 90-bot cap on small hosting plans.
+- Server simulation runs at 30 Hz, detailed client state at 10 Hz, minimap at 1 Hz, and stats/debug data at 1 Hz.
+- Clients receive detailed data only for nearby objects around the player. Static map objects are sent once on join.
+- Minimap updates stay compact: every boat is shown, but only small fields like id, type, position, and size class are sent.
 - Bots spawn away from Harbor, players, obstacles, loot, and items. Coast gets mostly weak bots, Wreck Field gets medium bots, and Storm/Deep Water gets stronger bots.
-- Bots can use all 25 ship classes with weighted rarity. Strong endgame bot ships are much rarer and appear mainly farther from beginner areas.
-- Destroyed bots grant loot and XP. Kill loot is split between the last hitter and assisting damage dealers.
+- Bots can use all 25 ship classes with weighted rarity. Coast has mostly small/medium bots, Wreck Field adds more large bots, and Storm/Deep Water has more large and elite bots.
+- Large and elite bots are visually larger, have stronger outlines, heavier wake, extra weapons/armor, and larger minimap markers.
+- Destroyed ships grant loot and XP only to the player who lands the final hit. Assist loot has been removed.
+- Bot rewards scale by class: small bots give about 50-100 temporary loot, medium 150-250, large 400-700, and elite 1000-1500.
 - Destroyed players keep secured points but lose temporary loot. Half of that temporary loot drops as a crate.
 - After 5 seconds without taking damage, players regenerate 5% max HP per second until full HP.
 - Full Repair Kits restore HP to full immediately.
@@ -148,6 +153,7 @@ Performance model:
 - The minimap shows the whole map: own ship in white, other players in blue, allies in green, bots in red/orange, strong bots larger/orange, Harbor, land, rocks, loot, items, and N/S/E/W labels.
 - Mobile browsers get touch controls: virtual joystick, Fire, Boost, Exit, and Map buttons. Landscape orientation is recommended.
 - Chat has Global and Alliance channels. A simple server-side filter blocks long messages, spam, repeated characters, and placeholder banned words.
+- Press F3 to show debug data: FPS, ping, online players, total/visible bots, total/visible projectiles, network updates, payload sizes, and server tick time.
 
 ## Ships
 
